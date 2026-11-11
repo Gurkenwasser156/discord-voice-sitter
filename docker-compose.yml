@@ -1,0 +1,22 @@
+# Jeder Bot braucht ein EIGENES Token (eigene Bot-Application im Developer Portal).
+# Pro Bot eine Datei bots/<name>.env anlegen (Vorlage: .env.example).
+# Mehr Bots: Block kopieren, Namen + env_file anpassen.
+
+x-bot: &bot
+  image: ghcr.io/gurkenwasser156/discord-voice-sitter:latest
+  build: .
+  restart: always
+  logging:
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "2"
+
+services:
+  bot1:
+    <<: *bot
+    env_file: bots/bot1.env
+
+  bot2:
+    <<: *bot
+    env_file: bots/bot2.env
