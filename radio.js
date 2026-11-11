@@ -18,6 +18,9 @@ const NOWPLAYING_MS = 15_000;
 const RESTART_MIN_MS = 2_000;
 const RESTART_MAX_MS = 60_000;
 
+// Ehrlicher User-Agent, damit Radio-Betreiber den Bot erkennen/freigeben können
+const USER_AGENT = 'discord-voice-sitter-radio/1.0 (+https://github.com/Gurkenwasser156/discord-voice-sitter)';
+
 const log = (...a) => console.log(new Date().toISOString(), '[radio]', ...a);
 
 /**
@@ -57,7 +60,10 @@ async function resolveFfmpeg(explicit) {
 }
 
 async function fetchNowPlaying(apiUrl) {
-  const res = await fetch(apiUrl, { signal: AbortSignal.timeout(10_000) });
+  const res = await fetch(apiUrl, {
+    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+    signal: AbortSignal.timeout(10_000),
+  });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json();
 }
@@ -119,7 +125,8 @@ export async function createRadio(client, env) {
   function scheduleRestart(reason) {
     if (restartTimer) return;
     // Lief der Stream länger als eine Minute stabil, wieder bei 2s anfangen
-    if (Date.now() - startedAt > 60_000) failures = 0;
+    if (startedAt && Date.now() - startedAt > 60_000) failures = 0;
+    startedAt = 0;
     const delay = Math.min(RESTART_MIN_MS * 2 ** failures, RESTART_MAX_MS);
     failures++;
     log(`${reason} -> Neustart in ${delay / 1000}s`);
@@ -134,6 +141,7 @@ export async function createRadio(client, env) {
     const args = [
       '-hide_banner', '-loglevel', 'error',
       // HTTP-Abbrüche selbst abfangen, bevor der Player überhaupt Idle wird
+      '-user_agent', USER_AGENT,
       '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_on_network_error', '1',
       '-reconnect_delay_max', '5',
       // Hängt der Server ohne Abbruch (keine Daten), nach 15s aufgeben
