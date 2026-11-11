@@ -10,7 +10,12 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --omit=optional --no-audit --no-fund && npm cache clean --force
+# Optionale Pakete NICHT weglassen: @snazzah/davey (Voice-Verschlüsselung) liefert
+# seine Linux-Binary als optionale Dependency. --ignore-scripts verhindert nur,
+# dass ffmpeg-static sein eigenes ffmpeg herunterlädt (wir nutzen System-ffmpeg).
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+ && node -e "require('@snazzah/davey')" \
+ && npm cache clean --force
 
 COPY index.js radio.js ./
 
