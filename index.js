@@ -32,12 +32,14 @@ try {
 let connection = null;
 let joining = false;
 let retryTimer = null;
+// Aktueller Ziel-Channel: startet bei CHANNEL_ID, folgt aber, wenn jemand den Bot verschiebt
+let targetChannelId = CHANNEL_ID;
 
 // Grundregel: Der Bot zerstört seine Voice-Verbindung NIE selbst.
 // Statt destroy() wird immer rejoin() genutzt -> kein unnötiger Leave.
 
 function inTargetChannel() {
-  return client.guilds.cache.get(GUILD_ID)?.members.me?.voice.channelId === CHANNEL_ID;
+  return client.guilds.cache.get(GUILD_ID)?.members.me?.voice.channelId === targetChannelId;
 }
 
 function isHealthy() {
@@ -68,7 +70,7 @@ function attachHandlers(conn) {
     } catch {
       if (conn === connection && conn.state.status === VoiceConnectionStatus.Disconnected) {
         log('Getrennt -> rejoin');
-        conn.rejoin({ channelId: CHANNEL_ID, selfDeaf: true, selfMute: false });
+        conn.rejoin({ channelId: targetChannelId, selfDeaf: true, selfMute: false });
       }
     }
   });
@@ -87,13 +89,20 @@ async function ensureJoined() {
   joining = true;
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
-    const channel = await guild.channels.fetch(CHANNEL_ID);
-    if (!channel?.isVoiceBased()) throw new Error('CHANNEL_ID ist kein Voice-Channel');
+    const channel = await guild.channels.fetch(targetChannelId).catch(() => null);
+    if (!channel?.isVoiceBased()) {
+      if (targetChannelId !== CHANNEL_ID) {
+        // Channel, in den der Bot verschoben wurde, gibt's nicht mehr -> zurück zum Standard
+        log(`Channel ${targetChannelId} nicht mehr verfügbar -> zurück zu CHANNEL_ID`);
+        targetChannelId = CHANNEL_ID;
+      }
+      throw new Error('Ziel ist kein (erreichbarer) Voice-Channel');
+    }
 
     // joinVoiceChannel nutzt eine bestehende Verbindung weiter (rejoin statt leave)
     const conn = joinVoiceChannel({
       guildId: GUILD_ID,
-      channelId: CHANNEL_ID,
+      channelId: targetChannelId,
       adapterCreator: guild.voiceAdapterCreator,
       selfDeaf: true,
       selfMute: false,
@@ -115,16 +124,23 @@ async function ensureJoined() {
   }
 }
 
-// Gekickt oder verschoben -> sofort zurück
+// Verschoben -> im neuen Channel bleiben. Rausgekickt -> zurück in den letzten Channel.
 client.on(Events.VoiceStateUpdate, (_old, newState) => {
   if (newState.id !== client.user.id || newState.guild.id !== GUILD_ID) return;
-  if (newState.channelId !== CHANNEL_ID) {
-    log(`Aus dem Channel entfernt/verschoben (${newState.channelId ?? 'keiner'}) -> zurück`);
-    if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
-      connection.rejoin({ channelId: CHANNEL_ID, selfDeaf: true, selfMute: false });
-    } else {
-      scheduleJoin(0);
+
+  if (newState.channelId) {
+    if (newState.channelId !== targetChannelId) {
+      targetChannelId = newState.channelId;
+      log(`Verschoben nach "${newState.channel?.name ?? newState.channelId}" -> bleibe hier`);
     }
+    return;
+  }
+
+  log('Aus dem Channel entfernt -> zurück');
+  if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    connection.rejoin({ channelId: targetChannelId, selfDeaf: true, selfMute: false });
+  } else {
+    scheduleJoin(0);
   }
 });
 
