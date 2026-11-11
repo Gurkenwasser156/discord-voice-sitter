@@ -133,4 +133,14 @@ client.on(Events.Error, (err) => log('Client-Fehler:', err.message));
 process.on('unhandledRejection', (err) => log('unhandledRejection:', err));
 process.on('uncaughtException', (err) => log('uncaughtException:', err));
 
-client.login(DISCORD_TOKEN);
+function login() {
+  client.login(DISCORD_TOKEN).catch((err) => {
+    if (err.code === 'TokenInvalid') {
+      console.error('Token ungültig – bitte DISCORD_TOKEN prüfen.');
+      process.exit(1);
+    }
+    log('Login fehlgeschlagen:', err.message, '-> neuer Versuch in 5s');
+    setTimeout(login, 5_000);
+  });
+}
+login();
