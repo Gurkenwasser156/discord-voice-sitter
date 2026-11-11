@@ -45,9 +45,19 @@ export function parseRadioConfig(env) {
   return {
     apiUrl: `${base.replace(/\/+$/, '')}/api/nowplaying/${encodeURIComponent(station)}`,
     streamOverride: env.STREAM_URL || null,
-    volume: env.VOLUME ? Number(env.VOLUME) : null,
+    volume: parseVolume(env.VOLUME),
     ffmpegPath: env.FFMPEG_PATH || null,
   };
+}
+
+const DEFAULT_VOLUME = 0.3;
+
+/** "0.5", "50%" -> 0.5; leer/ungültig -> Standard (30%) */
+function parseVolume(raw) {
+  if (raw == null || String(raw).trim() === '') return DEFAULT_VOLUME;
+  const str = String(raw).trim();
+  const v = str.endsWith('%') ? Number(str.slice(0, -1)) / 100 : Number(str);
+  return Number.isFinite(v) && v >= 0 ? v : DEFAULT_VOLUME;
 }
 
 async function resolveFfmpeg(explicit) {
@@ -88,6 +98,7 @@ export async function createRadio(client, env) {
   const ffmpegPath = await resolveFfmpeg(cfg.ffmpegPath);
   log(`API: ${cfg.apiUrl}`);
   log(`ffmpeg: ${ffmpegPath}`);
+  log(`Lautstärke: ${Math.round(cfg.volume * 100)}%`);
 
   // Play statt Pause: auch ohne Zuhörer weiterlaufen, sonst hinkt der Live-Stream hinterher
   const player = createAudioPlayer({
@@ -148,7 +159,7 @@ export async function createRadio(client, env) {
       '-rw_timeout', '15000000',
       '-i', streamUrl,
       '-vn',
-      ...(cfg.volume != null && cfg.volume !== 1 ? ['-af', `volume=${cfg.volume}`] : []),
+      ...(cfg.volume !== 1 ? ['-af', `volume=${cfg.volume}`] : []),
       // Direkt Ogg/Opus erzeugen -> kein Opus-Encoder in Node nötig
       '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2',
       '-f', 'ogg', 'pipe:1',
