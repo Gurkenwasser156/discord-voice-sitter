@@ -4,6 +4,7 @@ import {
   entersState,
   VoiceConnectionStatus,
 } from '@discordjs/voice';
+import { createRadio } from './radio.js';
 
 try { process.loadEnvFile(); } catch { /* keine .env -> Umgebungsvariablen nutzen */ }
 
@@ -19,6 +20,14 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
+
+let radio;
+try {
+  radio = await createRadio(client, process.env);
+} catch (err) {
+  console.error(err.message);
+  process.exit(1);
+}
 
 let connection = null;
 let joining = false;
@@ -59,7 +68,7 @@ function attachHandlers(conn) {
     } catch {
       if (conn === connection && conn.state.status === VoiceConnectionStatus.Disconnected) {
         log('Getrennt -> rejoin');
-        conn.rejoin({ channelId: CHANNEL_ID, selfDeaf: true, selfMute: true });
+        conn.rejoin({ channelId: CHANNEL_ID, selfDeaf: true, selfMute: false });
       }
     }
   });
@@ -87,12 +96,14 @@ async function ensureJoined() {
       channelId: CHANNEL_ID,
       adapterCreator: guild.voiceAdapterCreator,
       selfDeaf: true,
-      selfMute: true,
+      selfMute: false,
     });
     if (conn !== connection) {
       connection = conn;
       attachHandlers(conn);
     }
+    // Player an die (ggf. neue) Verbindung hängen; rejoin() behält die Subscription
+    conn.subscribe(radio.player);
 
     await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
     log(`Im Channel "${channel.name}"`);
@@ -110,7 +121,7 @@ client.on(Events.VoiceStateUpdate, (_old, newState) => {
   if (newState.channelId !== CHANNEL_ID) {
     log(`Aus dem Channel entfernt/verschoben (${newState.channelId ?? 'keiner'}) -> zurück`);
     if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
-      connection.rejoin({ channelId: CHANNEL_ID, selfDeaf: true, selfMute: true });
+      connection.rejoin({ channelId: CHANNEL_ID, selfDeaf: true, selfMute: false });
     } else {
       scheduleJoin(0);
     }
@@ -119,6 +130,7 @@ client.on(Events.VoiceStateUpdate, (_old, newState) => {
 
 client.once(Events.ClientReady, (c) => {
   log(`Eingeloggt als ${c.user.tag}`);
+  radio.start();
   ensureJoined();
   // Watchdog: greift nur ein, wenn der Bot wirklich nicht im Channel ist
   setInterval(() => { if (!isHealthy()) ensureJoined(); }, WATCHDOG_MS);

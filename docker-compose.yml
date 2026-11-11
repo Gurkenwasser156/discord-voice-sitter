@@ -1,28 +1,19 @@
-# Jeder Bot braucht ein EIGENES Token (eigene Bot-Application im Developer Portal).
-# Pro Bot eine Datei bots/<name>.env anlegen (Vorlage: .env.example).
-# Mehr Bots: Block kopieren, Namen + env_file anpassen.
+# Radio-Bot: sitzt 24/7 im Voice-Channel und spielt das AzuraCast-Radio.
+# Konfiguration in bots/radio.env anlegen (Vorlage: .env.example).
 #
-# Damit der Channel NIE leer wird (Timer läuft weiter):
-# - Alle Bots in DENSELBEN Channel setzen, am besten auf verschiedenen Rechnern.
-# - Updates immer nur EINEN Bot nach dem anderen neu starten:
-#     docker compose pull && docker compose up -d bot1   (warten bis "Im Channel")
-#     docker compose up -d bot2
-
-x-bot: &bot
-  image: ghcr.io/gurkenwasser156/discord-voice-sitter:latest
-  build: .
-  restart: always
-  logging:
-    driver: json-file
-    options:
-      max-size: "5m"
-      max-file: "2"
+# Bricht der Stream ab, startet nur der Player neu – der Bot bleibt im Channel,
+# der Uptime-Timer läuft weiter. Nur bei einem Container-Neustart (Update)
+# verlässt er kurz den Channel. Soll der Timer auch das überleben, zusätzlich
+# einen normalen Sitter-Bot (main-Branch, eigenes Token) in den Channel setzen.
 
 services:
-  bot1:
-    <<: *bot
-    env_file: bots/bot1.env
-
-  bot2:
-    <<: *bot
-    env_file: bots/bot2.env
+  radio:
+    image: ghcr.io/gurkenwasser156/discord-voice-sitter:radio
+    build: .
+    restart: always
+    env_file: bots/radio.env
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
