@@ -1,6 +1,12 @@
 # Jeder Bot braucht ein EIGENES Token (eigene Bot-Application im Developer Portal).
 # Pro Bot eine Datei bots/<name>.env anlegen (Vorlage: .env.example).
 # Mehr Bots: Block kopieren, Namen + env_file anpassen.
+#
+# Damit der Channel NIE leer wird (Timer läuft weiter):
+# - Alle Bots in DENSELBEN Channel setzen, am besten auf verschiedenen Rechnern.
+# - Updates immer nur EINEN Bot nach dem anderen neu starten:
+#     docker compose pull && docker compose up -d bot1   (warten bis "Im Channel")
+#     docker compose up -d bot2
 
 x-bot: &bot
   image: ghcr.io/gurkenwasser156/discord-voice-sitter:latest
