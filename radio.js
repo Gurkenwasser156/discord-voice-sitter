@@ -86,6 +86,22 @@ function pickStreamUrl(np) {
   return mount?.url || st.listen_url || null;
 }
 
+/** Aktuellen Song als schlankes Objekt (für /fav). */
+function songInfo(np) {
+  const song = np?.now_playing?.song;
+  if (!song) return null;
+  const text = songText(np);
+  if (!text) return null;
+  return {
+    id: song.id || text,
+    artist: song.artist?.trim() || null,
+    title: song.title?.trim() || null,
+    album: song.album?.trim() || null,
+    text,
+    art: song.art || null,
+  };
+}
+
 function songText(np) {
   const song = np?.now_playing?.song;
   if (!song) return null;
@@ -111,6 +127,7 @@ export async function createRadio(client, env) {
   let failures = 0;
   let startedAt = 0;
   let lastActivity = null;
+  let current = null; // aktueller Song (songInfo)
 
   async function refreshStreamUrl() {
     if (cfg.streamOverride) return;
@@ -193,6 +210,7 @@ export async function createRadio(client, env) {
   async function updatePresence() {
     try {
       const np = await fetchNowPlaying(cfg.apiUrl);
+      current = songInfo(np) ?? current;
       const live = np?.live?.is_live ? `🔴 ${np.live.streamer_name || 'LIVE'}: ` : '';
       const text = songText(np);
       const name = (live + (text ?? np?.station?.name ?? 'Radio')).slice(0, 128);
@@ -208,6 +226,15 @@ export async function createRadio(client, env) {
 
   return {
     player,
+    /** Aktueller Song; holt bei Bedarf frisch von der API, sonst letzter bekannter Stand. */
+    async nowPlaying() {
+      try {
+        current = songInfo(await fetchNowPlaying(cfg.apiUrl)) ?? current;
+      } catch (err) {
+        log('Now Playing für /fav fehlgeschlagen, nutze letzten Stand:', err.message);
+      }
+      return current;
+    },
     start() {
       start();
       updatePresence();

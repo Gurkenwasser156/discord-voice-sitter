@@ -3,6 +3,8 @@ node_modules/
 .env.*
 !.env.example
 bots/*.env
+data/
+*.patch
 *.log
 .claude-flow/
 .swarm/

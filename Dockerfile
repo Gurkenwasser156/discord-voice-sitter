@@ -17,7 +17,11 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && node -e "require('@snazzah/davey')" \
  && npm cache clean --force
 
-COPY index.js radio.js ./
+COPY index.js radio.js store.js youtube.js commands.js ./
+
+# Favoriten + YouTube-Verknüpfungen (als Volume gemountet)
+RUN mkdir -p /app/data && chown node:node /app/data
+ENV DATA_DIR=/app/data
 
 USER node
 

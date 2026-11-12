@@ -5,6 +5,9 @@ import {
   VoiceConnectionStatus,
 } from '@discordjs/voice';
 import { createRadio } from './radio.js';
+import { createStore } from './store.js';
+import { createYoutube } from './youtube.js';
+import { setupCommands } from './commands.js';
 
 try { process.loadEnvFile(); } catch { /* keine .env -> Umgebungsvariablen nutzen */ }
 
@@ -28,6 +31,20 @@ try {
   console.error(err.message);
   process.exit(1);
 }
+
+// Private Favoriten (/fav, /favs, /unfav) + optionale YouTube-Playlist (/youtube)
+const youtube = createYoutube({
+  clientId: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+});
+setupCommands({
+  client,
+  guildId: GUILD_ID,
+  radio,
+  store: createStore(process.env.DATA_DIR || './data'),
+  youtube,
+});
+log(youtube ? 'YouTube-Playlists aktiv' : 'YouTube-Playlists aus (GOOGLE_CLIENT_ID/SECRET nicht gesetzt)');
 
 let connection = null;
 let joining = false;

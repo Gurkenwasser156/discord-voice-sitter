@@ -12,8 +12,13 @@ services:
     build: .
     restart: always
     env_file: bots/radio.env
+    volumes:
+      - radio-data:/app/data   # Favoriten + YouTube-Logins, überlebt Updates
     logging:
       driver: json-file
       options:
         max-size: "5m"
         max-file: "2"
+
+volumes:
+  radio-data:
