@@ -5,6 +5,10 @@
 # der Uptime-Timer läuft weiter. Nur bei einem Container-Neustart (Update)
 # verlässt er kurz den Channel. Soll der Timer auch das überleben, zusätzlich
 # einen normalen Sitter-Bot (main-Branch, eigenes Token) in den Channel setzen.
+#
+# Auto-Update: Push auf radio-bot -> GitHub Actions baut :radio -> watchtower
+# merkt das neue Image (Check alle 5 Min), zieht es und startet den Bot neu.
+# Manuell sofort: docker compose pull radio && docker compose up -d radio
 
 services:
   radio:
@@ -12,8 +16,30 @@ services:
     build: .
     restart: always
     env_file: bots/radio.env
+    labels:
+      - com.centurylinklabs.watchtower.enable=true   # nur dieser Container wird auto-geupdatet
     volumes:
       - radio-data:/app/data   # Favoriten + YouTube-Logins, überlebt Updates
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # Gepflegter Fork von containrrr/watchtower (Original ist eingestellt und
+  # erstellt unter Docker 29 keine Container mehr neu). Gleiche Optionen/Labels.
+  watchtower:
+    image: nickfedor/watchtower:latest
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Falls das GHCR-Paket privat ist: vorher "docker login ghcr.io" und diese Zeile einkommentieren
+      # - ~/.docker/config.json:/config.json:ro
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"   # nur Container mit dem Label oben anfassen
+      WATCHTOWER_POLL_INTERVAL: "300"   # alle 5 Minuten nach neuem Image schauen
+      WATCHTOWER_CLEANUP: "true"        # alte Images danach löschen
+      TZ: Europe/Berlin
     logging:
       driver: json-file
       options:
