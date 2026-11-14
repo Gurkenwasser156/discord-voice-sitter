@@ -26,25 +26,5 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # Gepflegter Fork von containrrr/watchtower (Original ist eingestellt und
-  # erstellt unter Docker 29 keine Container mehr neu). Gleiche Optionen/Labels.
-#  watchtower:
-#    image: nickfedor/watchtower:latest
-#    restart: always
-#    volumes:
-#      - /var/run/docker.sock:/var/run/docker.sock
-#      # Falls das GHCR-Paket privat ist: vorher "docker login ghcr.io" und diese Zeile einkommentieren
-#      # - ~/.docker/config.json:/config.json:ro
-#    environment:
-#      WATCHTOWER_LABEL_ENABLE: "true"   # nur Container mit dem Label oben anfassen
-#      WATCHTOWER_POLL_INTERVAL: "300"   # alle 5 Minuten nach neuem Image schauen
-#      WATCHTOWER_CLEANUP: "true"        # alte Images danach löschen
-#      TZ: Europe/Berlin
-#    logging:
-#      driver: json-file
-#      options:
-#        max-size: "5m"
-#        max-file: "2"
-
 volumes:
   radio-data:
