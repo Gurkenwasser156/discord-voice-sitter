@@ -30,6 +30,9 @@ export function createStore(dataDir) {
     }
   }
 
+  console.log(new Date().toISOString(), '[favs]',
+    `${Object.keys(data.users).length} User mit Favoriten geladen aus ${path.resolve(file)}`);
+
   function save() {
     const tmp = `${file}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });

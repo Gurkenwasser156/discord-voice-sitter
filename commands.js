@@ -71,7 +71,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
       log(`YouTube für ${userId}:`, err.message);
       if (err.code === 'quota') return { ok: false, stop: true, line: '⚠️ YouTube-Tageslimit erreicht – morgen mit `/youtube nachtragen` hinzufügen.' };
       if (err.code === 'revoked') return { ok: false, stop: true, line: `⚠️ ${err.message}` };
-      if (err.code === 'novideo') return { ok: false, line: '⚠️ Kein passendes Video auf YouTube gefunden.' };
+      if (err.code === 'novideo') return { ok: false, line: `⚠️ Kein sicherer YouTube-Treffer, darum nichts hinzugefügt · [selbst suchen](${ytSearch(fav)})` };
       return { ok: false, stop: true, line: `⚠️ YouTube: ${err.message}` };
     }
   }
@@ -224,7 +224,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
 
     try {
       const refreshToken = await login.done;
-      const playlistId = await youtube.createPlaylist(refreshToken);
+      const playlistId = await youtube.findOrCreatePlaylist(refreshToken);
       store.setYoutube(i.user.id, { refreshToken, playlistId });
       log(`YouTube verbunden für ${i.user.id}`);
       const missing = store.favs(i.user.id).length;
@@ -233,7 +233,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
           .setColor(COLOR)
           .setTitle('✅ YouTube verbunden')
           .setDescription([
-            `Private Playlist angelegt: [öffnen](${youtube.playlistUrl(playlistId)})`,
+            `Deine private Playlist: [öffnen](${youtube.playlistUrl(playlistId)})`,
             'Ab jetzt landet jeder `/fav` automatisch darin.',
             missing ? `Deine ${missing} bisherigen Favoriten kannst du mit \`/youtube nachtragen\` übernehmen.` : '',
           ].filter(Boolean).join('\n'))],
