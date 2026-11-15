@@ -30,16 +30,28 @@ audio/
     to/TO_AD_01.opus
     id_01/ID_01.opus
     mono_solo_01/MONO_SOLO_01.opus
-    ad/…  news/…       <- optional
+  adverts/             <- Werbung, gilt für alle GTA-Sender (RADIO_ADVERTS.rpf)
+    mono_ad001_life_invader/MONO_AD001_LIFE_INVADER.opus
+  news/                <- Nachrichten, gilt für alle GTA-Sender (RADIO_NEWS.rpf)
+    mono_news_01/MONO_NEWS_01.opus
 ```
+
+Werbung und Nachrichten liegen im Spiel unter `x64audiosfxRADIO_ADVERTS.rpf` und
+`RADIO_NEWS.rpf` und werden von allen Sendern geteilt. Die Ordner dürfen auch
+`Radio Adverts` / `Radio News` heißen (so, wie OpenIV sie exportiert). TV-Spots und
+-Sendungen (`mono_tv_…`) und alles über 3 Minuten wird nicht als Werbung gespielt.
+Ein Sender kann eigene `ad/`/`news/` im Sender-Ordner haben oder sie per
+`"ads": false` / `"news": false` in seiner JSON abschalten.
 
 Das ist genau die Struktur der üblichen GTA-V-Dumps (OpenIV). WAV geht direkt, kleiner wird es mit:
 
 ```
 node scripts/convert-audio.mjs "<dump-ordner>" audio/non-stop-pop
+node scripts/convert-audio.mjs "<Radio Adverts>" audio/adverts
+node scripts/convert-audio.mjs "<Radio News>" audio/news
 ```
 
-(1,8 GB WAV → ca. 200 MB Opus.) Fehlt der Ordner, wird der Sender beim Start einfach übersprungen.
+(Non-Stop-Pop 1,8 GB WAV → ca. 200 MB, Werbung + Nachrichten 1,3 GB → ca. 170 MB.) Fehlt der Ordner, wird der Sender beim Start einfach übersprungen.
 
 ### Neuen GTA-Sender hinzufügen
 

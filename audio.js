@@ -33,8 +33,11 @@ export function opusOutputArgs(volume) {
   ];
 }
 
-/** Dauer einer Audiodatei in Sekunden (über ffmpeg selbst – ffprobe ist bei ffmpeg-static nicht dabei). */
-export function probeDuration(ffmpegPath, file) {
+/**
+ * Dauer (Sekunden) und ob mono – über ffmpeg selbst, ffprobe ist bei ffmpeg-static nicht dabei.
+ * Gibt { duration, mono } zurück.
+ */
+export function probeAudio(ffmpegPath, file) {
   return new Promise((resolve, reject) => {
     const proc = spawn(ffmpegPath, ['-hide_banner', '-i', file], { stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
@@ -43,7 +46,10 @@ export function probeDuration(ffmpegPath, file) {
     proc.on('close', () => {
       const m = err.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
       if (!m) return reject(new Error(`Keine Dauer für ${file}`));
-      resolve(Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]));
+      resolve({
+        duration: Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]),
+        mono: /Audio:.*mono/.test(err),
+      });
     });
   });
 }

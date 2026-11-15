@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { opusOutputArgs, probeDuration, PCM_BYTES_PER_SEC, SAMPLE_RATE, CHANNELS } from '../audio.js';
+import { opusOutputArgs, probeAudio, PCM_BYTES_PER_SEC, SAMPLE_RATE, CHANNELS } from '../audio.js';
 
 // GTA-V-Radiosender aus einem Audio-Dump: Songs, DJ-Moderation und Jingles werden
 // live zusammengemischt, so wie es das Spiel macht:
@@ -22,7 +22,14 @@ import { opusOutputArgs, probeDuration, PCM_BYTES_PER_SEC, SAMPLE_RATE, CHANNELS
 //   to/TO_AD_01.wav                Überleitungen zu Werbung/Nachrichten
 //   id_01/ID_01.wav                Station-IDs / Jingles
 //   mono_solo_01/MONO_SOLO_01.wav  DJ-Solos (Moderation ohne Musik)
-//   ad/…, news/…                   optional: Werbung, Nachrichten
+//   ad/…, news/…                   optional: Werbung, Nachrichten nur für diesen Sender
+//
+// Werbung und Nachrichten teilen sich im Spiel alle Sender (RADIO_ADVERTS.rpf, RADIO_NEWS.rpf).
+// Darum werden zusätzlich gemeinsame Ordner in AUDIO_DIR benutzt, auch mit Unterordnern
+// (z.B. "Radio Adverts/mono_ad001_life_invader/MONO_AD001_LIFE_INVADER.wav"):
+//   AUDIO_DIR/adverts  oder  AUDIO_DIR/Radio Adverts
+//   AUDIO_DIR/news     oder  AUDIO_DIR/Radio News
+// Pro Sender abschaltbar mit "ads": false / "news": false, oder anderer Ordner: "ads": "<ordner>".
 // Erlaubte Formate: alles, was ffmpeg liest (.wav, .ogg, .opus, .mp3, .flac, .m4a).
 
 const AUDIO_EXT = new Set(['.wav', '.ogg', '.opus', '.mp3', '.flac', '.m4a', '.aac']);
@@ -33,6 +40,9 @@ const INTRO = { time: 0.15, song: 0.55, general: 0.15 };      // Rest: Song ohne
 const VOICE_DELAY_MS = 800;   // DJ setzt kurz nach Songbeginn ein
 const MAX_CATCHUP_SEC = 12 * 3600; // länger weg -> einfach irgendwo neu einsteigen
 const MAX_DECODE_FAILURES = 5;
+const MAX_AD_SEC = 180;  // längere "Werbung" sind TV-Sendungen aus dem Dump
+// TV-Werbung/-Sendungen (mono_tv_…) liegen mit im Werbe-Archiv, gehören aber nicht ins Radio
+const isTvAudio = (f) => f.split(/[\\/]/).some((part) => /^(mono_)?tv_/i.test(part));
 
 const TIME_SLOTS = [
   { key: 'MORNING', from: 5, to: 12 },
@@ -45,6 +55,31 @@ const keyOf = (file) => path.basename(file, path.extname(file)).toUpperCase();
 const titleCase = (key) => key.toLowerCase().split('_').filter(Boolean)
   .map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
 const pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+/** Alle Audiodateien unterhalb von dir (rekursiv). */
+function listAudioDeep(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) return listAudioDeep(p);
+    return e.isFile() && AUDIO_EXT.has(path.extname(e.name).toLowerCase()) ? [p] : [];
+  }).sort();
+}
+
+const SHARED = {
+  ads: ['adverts', 'Radio Adverts', 'ads'],
+  news: ['news', 'Radio News'],
+};
+
+/** Gemeinsamer Werbe-/Nachrichten-Ordner: def.ads/def.news (Ordnername oder false) oder Standardnamen. */
+function sharedFiles(audioDir, setting, defaults) {
+  if (setting === false) return [];
+  const names = typeof setting === 'string' ? [setting] : defaults;
+  for (const name of names) {
+    const dir = path.resolve(audioDir, name);
+    if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) return listAudioDeep(dir);
+  }
+  return [];
+}
 
 function listAudio(dir) {
   return fs.readdirSync(dir, { withFileTypes: true })
@@ -90,8 +125,8 @@ function scanFolder(root, aliases, log) {
       }
     } else if (/^id(_\d+)?$/.test(folder)) lib.ids.push(...files);
     else if (/^(mono_)?solo(_\d+)?$/.test(folder) || /^mono_solo_\d+$/.test(folder)) lib.solos.push(...files);
-    else if (/^(ad|ads|advert|adverts)$/.test(folder)) lib.ads.push(...files);
-    else if (folder === 'news') lib.news.push(...files);
+    else if (/^(ad|ads|advert|adverts)$/.test(folder)) lib.ads.push(...listAudioDeep(dir));
+    else if (folder === 'news') lib.news.push(...listAudioDeep(dir));
     else {
       // Alles andere: ein Song pro Ordner
       for (const f of files) lib.songs.set(keyOf(f), f);
@@ -115,7 +150,7 @@ async function probeAll(files, { ffmpegPath, cacheFile, log }) {
   for (const file of files) {
     const st = fs.statSync(file);
     const sig = `${st.size}:${Math.round(st.mtimeMs)}`;
-    if (cache[file]?.sig === sig) durations.set(file, cache[file].d);
+    if (cache[file]?.sig === sig && 'mono' in cache[file]) durations.set(file, cache[file]);
     else todo.push({ file, sig });
   }
   if (todo.length) {
@@ -125,9 +160,9 @@ async function probeAll(files, { ffmpegPath, cacheFile, log }) {
       while (i < todo.length) {
         const { file, sig } = todo[i++];
         try {
-          const d = await probeDuration(ffmpegPath, file);
-          durations.set(file, d);
-          cache[file] = { sig, d };
+          const { duration, mono } = await probeAudio(ffmpegPath, file);
+          cache[file] = { sig, d: duration, mono };
+          durations.set(file, cache[file]);
         } catch (err) {
           log(err.message);
         }
@@ -174,6 +209,10 @@ export async function createGtaStation(def, { ffmpegPath, volume, audioDir, data
   }
 
   const lib = scanFolder(root, def.aliases ?? {}, log);
+  // Eigene ad/ bzw. news/ im Sender-Ordner haben Vorrang vor den gemeinsamen
+  if (!lib.ads.length) lib.ads = sharedFiles(audioDir, def.ads, SHARED.ads);
+  lib.ads = lib.ads.filter((f) => !isTvAudio(f));
+  if (!lib.news.length) lib.news = sharedFiles(audioDir, def.news, SHARED.news);
   if (!lib.songs.size) {
     log(`Keine Songs in ${root} -> Sender "${def.name}" übersprungen`);
     return null;
@@ -186,12 +225,16 @@ export async function createGtaStation(def, { ffmpegPath, volume, audioDir, data
   const durations = await probeAll(allFiles, {
     ffmpegPath, log, cacheFile: path.join(dataDir, 'durations.json'),
   });
-  const dur = (f) => durations.get(f) ?? 0;
+  const dur = (f) => durations.get(f)?.d ?? 0;
+  const isMono = (f) => durations.get(f)?.mono ?? false;
+  // Mono auf beide Kanäle legen (ohne die -3 dB, die ffmpegs Standard-Upmix kostet)
+  const stereo = (f) => (isMono(f) ? 'pan=stereo|c0=c0|c1=c0' : 'aformat=channel_layouts=stereo');
 
   // Dateien ohne Länge (kaputt/unlesbar) rauswerfen
   const ok = (f) => dur(f) > 0.1;
   for (const [k, f] of lib.songs) if (!ok(f)) lib.songs.delete(k);
   for (const k of ['general', 'ids', 'solos', 'ads', 'news']) lib[k] = lib[k].filter(ok);
+  lib.ads = lib.ads.filter((f) => dur(f) <= MAX_AD_SEC);
   for (const map of [lib.intros, lib.time, lib.to]) {
     for (const [k, list] of map) {
       const good = list.filter(ok);
@@ -296,7 +339,6 @@ export async function createGtaStation(def, { ffmpegPath, volume, audioDir, data
 
   function decoderArgs(s, offset) {
     const out = ['-f', 's16le', '-ar', String(SAMPLE_RATE), '-ac', String(CHANNELS), 'pipe:1'];
-    const voiceMono = 'aformat=channel_layouts=mono,pan=stereo|c0=c0|c1=c0';
     const fmt = `aformat=sample_fmts=fltp:sample_rates=${SAMPLE_RATE}`;
     const base = ['-hide_banner', '-loglevel', 'error', '-nostdin'];
 
@@ -305,8 +347,8 @@ export async function createGtaStation(def, { ffmpegPath, volume, audioDir, data
       return [
         ...base, '-i', s.file, '-i', s.voice.file,
         '-filter_complex',
-        `[0:a]${fmt},aformat=channel_layouts=stereo[m];`
-        + `[1:a]${voiceMono},${fmt},adelay=${VOICE_DELAY_MS}:all=1,apad[v];`
+        `[0:a]${stereo(s.file)},${fmt}[m];`
+        + `[1:a]${stereo(s.voice.file)},${fmt},adelay=${VOICE_DELAY_MS}:all=1,apad[v];`
         + '[v]asplit=2[sc][vm];'
         + '[m][sc]sidechaincompress=threshold=0.03:ratio=4:attack=40:release=700[d];'
         + '[d][vm]amix=inputs=2:duration=first:normalize=0[out]',
@@ -315,12 +357,11 @@ export async function createGtaStation(def, { ffmpegPath, volume, audioDir, data
         ...out,
       ];
     }
-    const isVoice = ['solo', 'to'].includes(s.type);
     return [
       ...base,
       ...(offset > 0 ? ['-ss', offset.toFixed(3)] : []),
       '-i', s.file,
-      ...(isVoice ? ['-af', voiceMono] : []),
+      '-af', stereo(s.file),
       ...out,
     ];
   }
