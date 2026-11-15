@@ -36,7 +36,7 @@ audio/
     mono_news_01/MONO_NEWS_01.opus
 ```
 
-Werbung und Nachrichten liegen im Spiel unter `x64audiosfxRADIO_ADVERTS.rpf` und
+Werbung und Nachrichten liegen im Spiel unter `x64\audio\sfx\RADIO_ADVERTS.rpf` und
 `RADIO_NEWS.rpf` und werden von allen Sendern geteilt. Die Ordner dürfen auch
 `Radio Adverts` / `Radio News` heißen (so, wie OpenIV sie exportiert). TV-Spots und
 -Sendungen (`mono_tv_…`) und alles über 3 Minuten wird nicht als Werbung gespielt.
