@@ -17,6 +17,24 @@ export class YoutubeError extends Error {
   }
 }
 
+/**
+ * Holt die Video-ID aus einem YouTube-Link (youtu.be, watch?v=, music.youtube.com,
+ * /shorts/, /embed/, /live/) oder nimmt eine nackte 11-stellige ID.
+ */
+export function parseVideoId(input) {
+  const s = String(input ?? '').trim();
+  if (/^[\w-]{11}$/.test(s)) return s;
+  let u;
+  try { u = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`); } catch { return null; }
+  const host = u.hostname.replace(/^(www|m|music)\./, '');
+  let id = null;
+  if (host === 'youtu.be') id = u.pathname.split('/')[1];
+  else if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
+    id = u.searchParams.get('v') ?? u.pathname.match(/^\/(?:shorts|embed|live|v)\/([\w-]{11})/)?.[1];
+  }
+  return id && /^[\w-]{11}$/.test(id) ? id : null;
+}
+
 // ---------- Treffer-Auswahl ----------
 // Nicht blind das erste Suchergebnis nehmen: Der Künstler muss im Videotitel
 // oder Kanalnamen vorkommen, sonst lieber gar nichts hinzufügen.
@@ -181,6 +199,26 @@ export function createYoutube({ clientId, clientSecret }) {
     return null;
   }
 
+  /** Fügt ein Video zur Playlist hinzu; fehlt die Playlist, wird sie gesucht bzw. neu angelegt. */
+  async function addVideo(yt, videoId) {
+    let playlistId = yt.playlistId;
+    const insert = () => api(yt.refreshToken, 'POST', 'playlistItems', {
+      query: { part: 'snippet' },
+      body: { snippet: { playlistId, resourceId: { kind: 'youtube#video', videoId } } },
+    });
+
+    let item;
+    try {
+      item = await insert();
+    } catch (err) {
+      // Nur wenn wirklich die PLAYLIST fehlt (nicht z.B. das Video)
+      if (err.reason !== 'playlistNotFound') throw err;
+      playlistId = await findOrCreatePlaylist(yt.refreshToken);
+      item = await insert();
+    }
+    return { videoId, itemId: item.id, playlistId };
+  }
+
   /** Vorhandene Playlist wiederverwenden, nur wenn es keine gibt eine neue anlegen. */
   async function findOrCreatePlaylist(refreshToken) {
     return (await findPlaylist(refreshToken)) ?? createPlaylist(refreshToken);
@@ -249,24 +287,11 @@ export function createYoutube({ clientId, clientSecret }) {
         videoId = pickBestVideo(song, any.items ?? []);
       }
       if (!videoId) throw new YoutubeError('Kein sicherer Treffer auf YouTube – lieber nichts als das falsche Video.', 'novideo');
-
-      let playlistId = yt.playlistId;
-      const insert = () => api(yt.refreshToken, 'POST', 'playlistItems', {
-        query: { part: 'snippet' },
-        body: { snippet: { playlistId, resourceId: { kind: 'youtube#video', videoId } } },
-      });
-
-      let item;
-      try {
-        item = await insert();
-      } catch (err) {
-        // Nur wenn wirklich die PLAYLIST fehlt (nicht z.B. das Video)
-        if (err.reason !== 'playlistNotFound') throw err;
-        playlistId = await findOrCreatePlaylist(yt.refreshToken);
-        item = await insert();
-      }
-      return { videoId, itemId: item.id, playlistId };
+      return addVideo(yt, videoId);
     },
+
+    /** Fügt ein bestimmtes Video hinzu (z.B. per /youtube setzen). 50 Quota. */
+    addVideo: (yt, videoId) => addVideo(yt, videoId),
 
     async removeItem(yt, itemId) {
       try {
@@ -281,6 +306,7 @@ export function createYoutube({ clientId, clientSecret }) {
       await postForm('https://oauth2.googleapis.com/revoke', { token: refreshToken }).catch(() => {});
     },
 
+    parseVideoId,
     playlistUrl: (playlistId) => `https://www.youtube.com/playlist?list=${playlistId}`,
     videoUrl: (videoId) => `https://www.youtube.com/watch?v=${videoId}`,
   };

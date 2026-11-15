@@ -69,6 +69,19 @@ export function createStore(dataDir) {
       return removed;
     },
 
+    /** n-ter Favorit (1-basiert, Reihenfolge wie in /favs: neueste zuerst). */
+    favAt(userId, n) {
+      const favs = user(userId).favs;
+      return n >= 1 && n <= favs.length ? favs[favs.length - n] : null;
+    },
+
+    /** Nummer eines Favoriten in /favs. */
+    favNumber(userId, favId) {
+      const favs = user(userId).favs;
+      const idx = favs.findIndex((f) => f.id === favId);
+      return idx < 0 ? null : favs.length - idx;
+    },
+
     updateFav(userId, favId, patch) {
       const fav = user(userId).favs.find((f) => f.id === favId);
       if (!fav) return;

@@ -53,7 +53,10 @@ const favCommandData = [
     .addSubcommand((s) => s.setName('verbinden').setDescription('Google-Account verknüpfen und Playlist anlegen'))
     .addSubcommand((s) => s.setName('trennen').setDescription('Google-Account wieder trennen'))
     .addSubcommand((s) => s.setName('status').setDescription('Verknüpfung und Playlist anzeigen'))
-    .addSubcommand((s) => s.setName('nachtragen').setDescription(`Favoriten ohne YouTube-Eintrag nachtragen (max. ${SYNC_LIMIT})`)),
+    .addSubcommand((s) => s.setName('nachtragen').setDescription(`Favoriten ohne YouTube-Eintrag nachtragen (max. ${SYNC_LIMIT})`))
+    .addSubcommand((s) => s.setName('setzen').setDescription('Das richtige YouTube-Video für einen Favoriten selbst festlegen')
+      .addIntegerOption((o) => o.setName('nummer').setDescription('Nummer aus /favs').setMinValue(1).setRequired(true))
+      .addStringOption((o) => o.setName('link').setDescription('YouTube-Link zum Video').setRequired(true))),
 ].map((c) => c.toJSON());
 
 const songs = (n) => `${n} ${n === 1 ? 'Song' : 'Songs'}`;
@@ -81,14 +84,22 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
     if (!yt) return null;
     try {
       const r = await youtube.addSong(yt, fav);
-      store.updateFav(userId, fav.id, { yt: { videoId: r.videoId, itemId: r.itemId } });
+      store.updateFav(userId, fav.id, { yt: { videoId: r.videoId, itemId: r.itemId }, ytMiss: undefined });
       if (r.playlistId !== yt.playlistId) store.setYoutube(userId, { ...yt, playlistId: r.playlistId });
       return { ok: true, line: `▶️ In deiner [YouTube-Playlist](${youtube.playlistUrl(r.playlistId)}) · [Video](${youtube.videoUrl(r.videoId)})` };
     } catch (err) {
       log(`YouTube für ${userId}:`, err.message);
       if (err.code === 'quota') return { ok: false, stop: true, line: '⚠️ YouTube-Tageslimit erreicht – morgen mit `/youtube nachtragen` hinzufügen.' };
       if (err.code === 'revoked') return { ok: false, stop: true, line: `⚠️ ${err.message}` };
-      if (err.code === 'novideo') return { ok: false, line: `⚠️ Kein sicherer YouTube-Treffer, darum nichts hinzugefügt · [selbst suchen](${ytSearch(fav)})` };
+      if (err.code === 'novideo') {
+        // Merken, damit /youtube nachtragen nicht jedes Mal erneut sucht (kostet Quota)
+        store.updateFav(userId, fav.id, { ytMiss: new Date().toISOString() });
+        const n = store.favNumber(userId, fav.id);
+        return {
+          ok: false,
+          line: `⚠️ Kein sicherer YouTube-Treffer, darum nichts hinzugefügt. [Selbst suchen](${ytSearch(fav)}) und dann \`/youtube setzen nummer:${n} link:…\``,
+        };
+      }
       return { ok: false, stop: true, line: `⚠️ YouTube: ${err.message}` };
     }
   }
@@ -168,11 +179,14 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
 
     if (sub === 'status') {
       if (!yt) return i.reply({ ...ephemeral, content: 'Nicht verbunden. Mit `/youtube verbinden` legst du eine private Playlist an.' });
-      const missing = store.favs(i.user.id).filter((f) => !f.yt).length;
+      const favs = store.favs(i.user.id);
+      const missing = favs.filter((f) => !f.yt && !f.ytMiss).length;
+      const misses = favs.filter((f) => !f.yt && f.ytMiss).map((f) => `#${store.favNumber(i.user.id, f.id)} ${esc(f.text)}`);
       return i.reply({
         ...ephemeral,
         content: `✅ Verbunden · [Deine Playlist](${youtube.playlistUrl(yt.playlistId)})`
-          + (missing ? `\n${missing} Favoriten sind noch nicht drin → \`/youtube nachtragen\`` : ''),
+          + (missing ? `\n${missing} Favoriten sind noch nicht drin → \`/youtube nachtragen\`` : '')
+          + (misses.length ? `\nOhne Treffer (→ \`/youtube setzen\`):\n${misses.slice(0, 10).map((m) => `• ${m}`).join('\n')}` : ''),
       });
     }
 
@@ -185,8 +199,10 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
 
     if (sub === 'nachtragen') {
       if (!yt) return i.reply({ ...ephemeral, content: 'Erst `/youtube verbinden`.' });
-      const todo = store.favs(i.user.id).filter((f) => !f.yt);
-      if (!todo.length) return i.reply({ ...ephemeral, content: '✅ Alle Favoriten sind schon in der Playlist.' });
+      const todo = store.favs(i.user.id).filter((f) => !f.yt && !f.ytMiss);
+      if (!todo.length) {
+        return i.reply({ ...ephemeral, content: '✅ Alles nachgetragen. Songs ohne Treffer siehst du in `/youtube status` und kannst sie mit `/youtube setzen` festlegen.' });
+      }
 
       await i.deferReply(ephemeral);
       let done = 0;
@@ -199,13 +215,42 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
           if (r.stop) break;
         }
       }
-      const rest = store.favs(i.user.id).filter((f) => !f.yt).length;
+      const rest = store.favs(i.user.id).filter((f) => !f.yt && !f.ytMiss).length;
       const ytNow = store.youtube(i.user.id);
       return i.editReply(
         `▶️ ${songs(done)} zur [Playlist](${youtube.playlistUrl(ytNow.playlistId)}) hinzugefügt.`
         + (problems.length ? `\n${problems.slice(0, 5).map((p) => `• ${p}`).join('\n')}` : '')
         + (rest ? `\nNoch ${rest} offen.` : ''),
       );
+    }
+
+    if (sub === 'setzen') {
+      if (!yt) return i.reply({ ...ephemeral, content: 'Erst `/youtube verbinden`.' });
+      const n = i.options.getInteger('nummer', true);
+      const fav = store.favAt(i.user.id, n);
+      if (!fav) return i.reply({ ...ephemeral, content: `Favorit #${n} gibt's nicht – schau in \`/favs\`.` });
+      const videoId = youtube.parseVideoId(i.options.getString('link', true));
+      if (!videoId) return i.reply({ ...ephemeral, content: 'Das sieht nicht nach einem YouTube-Link aus. Beispiel: `https://youtu.be/dQw4w9WgXcQ`' });
+      if (fav.yt?.videoId === videoId) {
+        return i.reply({ ...ephemeral, content: `Genau dieses Video ist für **${esc(fav.text)}** schon drin.` });
+      }
+
+      await i.deferReply(ephemeral);
+      const oldItemId = fav.yt?.itemId; // vor updateFav merken (fav wird dabei verändert)
+      try {
+        const r = await youtube.addVideo(yt, videoId);
+        // Altes (falsches) Video erst entfernen, wenn das neue drin ist
+        if (oldItemId) await youtube.removeItem(yt, oldItemId).catch((err) => log('Altes Video nicht entfernt:', err.message));
+        store.updateFav(i.user.id, fav.id, { yt: { videoId: r.videoId, itemId: r.itemId }, ytMiss: undefined });
+        if (r.playlistId !== yt.playlistId) store.setYoutube(i.user.id, { ...yt, playlistId: r.playlistId });
+        return i.editReply(`✅ **${esc(fav.text)}** → [Video](${youtube.videoUrl(videoId)}) ist jetzt in deiner [Playlist](${youtube.playlistUrl(r.playlistId)})`
+          + (oldItemId ? ' (das alte Video ist raus).' : '.'));
+      } catch (err) {
+        log(`YouTube setzen für ${i.user.id}:`, err.message);
+        if (err.reason === 'videoNotFound') return i.editReply('⚠️ Das Video gibt\'s nicht oder es ist privat.');
+        if (err.code === 'quota') return i.editReply('⚠️ YouTube-Tageslimit erreicht – morgen nochmal probieren.');
+        return i.editReply(`⚠️ ${err.message}`);
+      }
     }
 
     // verbinden
