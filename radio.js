@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { ActivityType } from 'discord.js';
 import {
   createAudioPlayer,
@@ -7,147 +8,70 @@ import {
   NoSubscriberBehavior,
   StreamType,
 } from '@discordjs/voice';
+import { resolveFfmpeg, parseVolume } from './audio.js';
+import { loadStations } from './stations/index.js';
 
-// AzuraCast-Radio: Stream-URL und "Now Playing" kommen aus der öffentlichen API
-//   GET <base>/api/nowplaying/<station>
+// Radio mit mehreren Sendern (Internet-Radio, GTA-V-Sender, …), umschaltbar per /radio.
 //
-// Grundregel wie im Sitter: Bricht der Stream ab, wird NUR der Player neu
+// Grundregel wie im Sitter: Bricht ein Stream ab, wird NUR der Player neu
 // gestartet. Die Voice-Verbindung bleibt unangetastet -> der Bot bleibt im Channel.
 
-const NOWPLAYING_MS = 15_000;
+const PRESENCE_MS = 5_000;
 const RESTART_MIN_MS = 2_000;
 const RESTART_MAX_MS = 60_000;
 
-// Ehrlicher User-Agent, damit Radio-Betreiber den Bot erkennen/freigeben können
-const USER_AGENT = 'discord-voice-sitter-radio/1.0 (+https://github.com/Gurkenwasser156/discord-voice-sitter)';
-
 const log = (...a) => console.log(new Date().toISOString(), '[radio]', ...a);
 
-/**
- * Akzeptiert die Public-Page-URL (https://host/public/<station>) oder
- * RADIO_BASE_URL + RADIO_STATION getrennt.
- */
-export function parseRadioConfig(env) {
-  let base = env.RADIO_BASE_URL;
-  let station = env.RADIO_STATION;
-
-  if (env.RADIO_URL) {
-    const u = new URL(env.RADIO_URL);
-    const m = u.pathname.match(/\/(?:public|listen|api\/nowplaying)\/([^/]+)/);
-    base ??= u.origin;
-    station ??= m?.[1];
-  }
-
-  if (!base || !station) {
-    throw new Error('RADIO_URL (z.B. https://radio.j-indies.net/public/j-indies) oder RADIO_BASE_URL + RADIO_STATION setzen.');
-  }
-
-  return {
-    apiUrl: `${base.replace(/\/+$/, '')}/api/nowplaying/${encodeURIComponent(station)}`,
-    streamOverride: env.STREAM_URL || null,
-    volume: parseVolume(env.VOLUME),
-    ffmpegPath: env.FFMPEG_PATH || null,
-  };
-}
-
-const DEFAULT_VOLUME = 0.3;
-
-/** "0.5", "50%" -> 0.5; leer/ungültig -> Standard (30%) */
-function parseVolume(raw) {
-  if (raw == null || String(raw).trim() === '') return DEFAULT_VOLUME;
-  const str = String(raw).trim();
-  const v = str.endsWith('%') ? Number(str.slice(0, -1)) / 100 : Number(str);
-  return Number.isFinite(v) && v >= 0 ? v : DEFAULT_VOLUME;
-}
-
-async function resolveFfmpeg(explicit) {
-  if (explicit) return explicit;
-  try {
-    const mod = await import('ffmpeg-static');
-    if (mod.default) return mod.default;
-  } catch { /* nicht installiert -> System-ffmpeg */ }
-  return 'ffmpeg';
-}
-
-async function fetchNowPlaying(apiUrl) {
-  const res = await fetch(apiUrl, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json();
-}
-
-/** Default-Mount bevorzugen, sonst listen_url der Station. */
-function pickStreamUrl(np) {
-  const st = np?.station ?? {};
-  const mounts = st.mounts ?? [];
-  const mount = mounts.find((m) => m.is_default) ?? mounts[0];
-  return mount?.url || st.listen_url || null;
-}
-
-/** Aktuellen Song als schlankes Objekt (für /fav). */
-function songInfo(np) {
-  const song = np?.now_playing?.song;
-  if (!song) return null;
-  const text = songText(np);
-  if (!text) return null;
-  return {
-    id: song.id || text,
-    artist: song.artist?.trim() || null,
-    title: song.title?.trim() || null,
-    album: song.album?.trim() || null,
-    text,
-    art: song.art || null,
-  };
-}
-
-function songText(np) {
-  const song = np?.now_playing?.song;
-  if (!song) return null;
-  const text = song.artist && song.title ? `${song.artist} – ${song.title}` : song.text;
-  return text?.trim() || null;
-}
-
 export async function createRadio(client, env) {
-  const cfg = parseRadioConfig(env);
-  const ffmpegPath = await resolveFfmpeg(cfg.ffmpegPath);
-  log(`API: ${cfg.apiUrl}`);
+  const ffmpegPath = await resolveFfmpeg(env.FFMPEG_PATH || null);
+  const volume = parseVolume(env.VOLUME);
+  const dataDir = env.DATA_DIR || './data';
+  const audioDir = env.AUDIO_DIR || './audio';
   log(`ffmpeg: ${ffmpegPath}`);
-  log(`Lautstärke: ${Math.round(cfg.volume * 100)}%`);
+  log(`Lautstärke: ${Math.round(volume * 100)}%`);
+  log(`Audio-Ordner (GTA-Sender): ${path.resolve(audioDir)}`);
+
+  const stations = await loadStations(env, { ffmpegPath, volume, audioDir, dataDir, log });
+  if (!stations.size) {
+    throw new Error('Kein Sender verfügbar: RADIO_URL setzen und/oder GTA-Audio nach AUDIO_DIR legen (siehe README).');
+  }
+  log(`Sender: ${[...stations.values()].map((s) => `${s.name} (${s.id})`).join(', ')}`);
+
+  // Zuletzt gewählter Sender überlebt Neustarts
+  const stateFile = path.join(dataDir, 'radio-state.json');
+  let saved = null;
+  try { saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')).station; } catch { /* erster Start */ }
+  const wanted = [saved, env.DEFAULT_STATION].find((id) => id && stations.has(id));
+  let station = stations.get(wanted) ?? stations.values().next().value;
+
+  function saveState() {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(stateFile, JSON.stringify({ station: station.id }));
+    } catch (err) {
+      log('Sender-Auswahl konnte nicht gespeichert werden:', err.message);
+    }
+  }
 
   // Play statt Pause: auch ohne Zuhörer weiterlaufen, sonst hinkt der Live-Stream hinterher
   const player = createAudioPlayer({
     behaviors: { noSubscriber: NoSubscriberBehavior.Play },
   });
 
-  let streamUrl = cfg.streamOverride;
-  let ffmpeg = null;
+  let handle = null;     // { stream, stop(), attach?() } des laufenden Senders
+  let resource = null;
   let restartTimer = null;
   let failures = 0;
   let startedAt = 0;
   let lastActivity = null;
-  let current = null; // aktueller Song (songInfo)
+  let generation = 0;    // verhindert, dass alte Streams nach einem Wechsel noch Neustarts auslösen
 
-  async function refreshStreamUrl() {
-    if (cfg.streamOverride) return;
-    try {
-      const url = pickStreamUrl(await fetchNowPlaying(cfg.apiUrl));
-      if (url && url !== streamUrl) {
-        log(`Stream-URL: ${url}`);
-        streamUrl = url;
-      }
-    } catch (err) {
-      log('Stream-URL konnte nicht geholt werden:', err.message);
-    }
-  }
-
-  function killFfmpeg() {
-    if (!ffmpeg) return;
-    ffmpeg.removeAllListeners();
-    ffmpeg.stdout?.removeAllListeners();
-    ffmpeg.kill('SIGKILL');
-    ffmpeg = null;
+  function stopCurrent() {
+    if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+    const h = handle;
+    handle = null;
+    resource = null;
+    try { h?.stop(); } catch (err) { log('Stoppen fehlgeschlagen:', err.message); }
   }
 
   function scheduleRestart(reason) {
@@ -162,58 +86,43 @@ export async function createRadio(client, env) {
   }
 
   async function start() {
-    killFfmpeg();
-    await refreshStreamUrl();
-    if (!streamUrl) return scheduleRestart('Keine Stream-URL');
+    stopCurrent();
+    const gen = ++generation;
+    const st = station;
+    let h;
+    try {
+      h = await st.open();
+    } catch (err) {
+      if (gen === generation) scheduleRestart(`${st.name}: ${err.message}`);
+      return;
+    }
+    if (gen !== generation) { h.stop(); return; } // inzwischen umgeschaltet
 
-    const args = [
-      '-hide_banner', '-loglevel', 'error',
-      // HTTP-Abbrüche selbst abfangen, bevor der Player überhaupt Idle wird
-      '-user_agent', USER_AGENT,
-      '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_on_network_error', '1',
-      '-reconnect_delay_max', '5',
-      // Hängt der Server ohne Abbruch (keine Daten), nach 15s aufgeben
-      '-rw_timeout', '15000000',
-      '-i', streamUrl,
-      '-vn',
-      ...(cfg.volume !== 1 ? ['-af', `volume=${cfg.volume}`] : []),
-      // Direkt Ogg/Opus erzeugen -> kein Opus-Encoder in Node nötig
-      '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2',
-      '-f', 'ogg', 'pipe:1',
-    ];
-
-    const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    ffmpeg = proc;
+    handle = h;
     startedAt = Date.now();
-
-    proc.stderr.on('data', (d) => log('ffmpeg:', d.toString().trim()));
-    proc.on('error', (err) => {
-      if (proc !== ffmpeg) return;
-      log('ffmpeg konnte nicht gestartet werden:', err.message);
-      ffmpeg = null;
-      scheduleRestart('ffmpeg-Fehler');
-    });
-    proc.on('close', (code) => {
-      if (proc === ffmpeg) log(`ffmpeg beendet (Code ${code})`);
-    });
-
-    player.play(createAudioResource(proc.stdout, { inputType: StreamType.OggOpus }));
-    log('Stream gestartet');
+    h.stream.on('error', () => {});
+    resource = createAudioResource(h.stream, { inputType: StreamType.OggOpus, metadata: { gen } });
+    h.attach?.(resource);
+    player.play(resource);
+    log(`${st.name} gestartet`);
+    updatePresence();
   }
 
-  player.on(AudioPlayerStatus.Idle, () => scheduleRestart('Stream zu Ende'));
-  player.on('error', (err) => scheduleRestart(`Player-Fehler: ${err.message}`));
   player.on('stateChange', (o, n) => {
-    if (o.status !== n.status && n.status === AudioPlayerStatus.Playing) failures = 0;
+    if (o.status === n.status) return;
+    if (n.status === AudioPlayerStatus.Playing) failures = 0;
+    // Nur reagieren, wenn der aktuelle Stream zu Ende ist (nicht der alte nach einem Wechsel)
+    if (n.status === AudioPlayerStatus.Idle && o.resource?.metadata?.gen === generation) {
+      scheduleRestart('Stream zu Ende');
+    }
+  });
+  player.on('error', (err) => {
+    if (err.resource?.metadata?.gen === generation) scheduleRestart(`Player-Fehler: ${err.message}`);
   });
 
   async function updatePresence() {
     try {
-      const np = await fetchNowPlaying(cfg.apiUrl);
-      current = songInfo(np) ?? current;
-      const live = np?.live?.is_live ? `🔴 ${np.live.streamer_name || 'LIVE'}: ` : '';
-      const text = songText(np);
-      const name = (live + (text ?? np?.station?.name ?? 'Radio')).slice(0, 128);
+      const name = String(await station.presence() || station.name).slice(0, 128);
       if (name !== lastActivity) {
         lastActivity = name;
         client.user?.setActivity({ name, type: ActivityType.Listening });
@@ -224,21 +133,33 @@ export async function createRadio(client, env) {
     }
   }
 
+  const info = (s) => ({ id: s.id, name: s.name, description: s.description, emoji: s.emoji, type: s.type, dj: s.dj ?? null });
+
   return {
     player,
-    /** Aktueller Song; holt bei Bedarf frisch von der API, sonst letzter bekannter Stand. */
+    /** Alle Sender (für /radio). */
+    stations: () => [...stations.values()].map(info),
+    current: () => info(station),
+    /** Aktueller Song des laufenden Senders (für /fav). */
     async nowPlaying() {
-      try {
-        current = songInfo(await fetchNowPlaying(cfg.apiUrl)) ?? current;
-      } catch (err) {
-        log('Now Playing für /fav fehlgeschlagen, nutze letzten Stand:', err.message);
-      }
-      return current;
+      return station.nowPlaying();
+    },
+    /** Auf einen anderen Sender umschalten. */
+    async switchTo(id) {
+      const next = stations.get(id);
+      if (!next) throw new Error(`Unbekannter Sender: ${id}`);
+      if (next === station) return info(station);
+      log(`Umschalten: ${station.name} -> ${next.name}`);
+      stopCurrent();
+      station = next;
+      failures = 0;
+      saveState();
+      await start();
+      return info(station);
     },
     start() {
       start();
-      updatePresence();
-      setInterval(updatePresence, NOWPLAYING_MS);
+      setInterval(updatePresence, PRESENCE_MS);
     },
   };
 }

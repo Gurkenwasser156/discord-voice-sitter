@@ -1,5 +1,7 @@
-# Radio-Bot: sitzt 24/7 im Voice-Channel und spielt das AzuraCast-Radio.
+# Radio-Bot: sitzt 24/7 im Voice-Channel und spielt Radio – umschaltbar per /radio
+# (AzuraCast-Radio aus RADIO_URL + GTA-V-Sender aus ./audio).
 # Konfiguration in bots/radio.env anlegen (Vorlage: .env.example).
+# GTA-Audio: neben diese Datei nach ./audio/<ordner>/ legen (z.B. ./audio/non-stop-pop/).
 #
 # Bricht der Stream ab, startet nur der Player neu – der Bot bleibt im Channel,
 # der Uptime-Timer läuft weiter. Nur bei einem Container-Neustart (Update)
@@ -16,10 +18,13 @@ services:
     build: .
     restart: always
     env_file: bots/radio.env
+    environment:
+      - TZ=Europe/Berlin       # für die Morgen-/Abend-Ansagen der GTA-DJs
 #    labels:
 #      - com.centurylinklabs.watchtower.enable=true   # nur dieser Container wird auto-geupdatet
     volumes:
       - radio-data:/app/data   # Favoriten + YouTube-Logins, überlebt Updates
+      - ./audio:/app/audio:ro  # GTA-Sender (Audio-Dumps), nicht im Image/Repo
     logging:
       driver: json-file
       options:

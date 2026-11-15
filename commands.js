@@ -3,8 +3,14 @@ import {
   EmbedBuilder,
   MessageFlags,
   Events,
+  PermissionFlagsBits,
 } from 'discord.js';
 
+// Sender:
+//   /radio liste             alle Sender anzeigen
+//   /radio wechseln <sender> umschalten (nur wer im Channel des Bots ist oder "Server verwalten" hat)
+//   /radio jetzt             was läuft gerade
+//
 // Private Favoriten (alle Antworten nur für den User sichtbar):
 //   /fav                 aktuellen Song speichern (+ in die eigene YouTube-Playlist)
 //   /favs [seite]        eigene Favoriten anzeigen
@@ -18,7 +24,18 @@ const COLOR = 0xe2557a;
 const log = (...a) => console.log(new Date().toISOString(), '[favs]', ...a);
 const ephemeral = { flags: MessageFlags.Ephemeral };
 
-const commandData = [
+function radioCommand(stations) {
+  return new SlashCommandBuilder()
+    .setName('radio')
+    .setDescription('Radiosender anzeigen und wechseln')
+    .addSubcommand((s) => s.setName('liste').setDescription('Alle Sender anzeigen'))
+    .addSubcommand((s) => s.setName('jetzt').setDescription('Was gerade läuft'))
+    .addSubcommand((s) => s.setName('wechseln').setDescription('Auf einen anderen Sender umschalten')
+      .addStringOption((o) => o.setName('sender').setDescription('Sender').setRequired(true)
+        .addChoices(...stations.slice(0, 25).map((st) => ({ name: st.name.slice(0, 100), value: st.id })))));
+}
+
+const favCommandData = [
   new SlashCommandBuilder()
     .setName('fav')
     .setDescription('Aktuellen Radio-Song in deine privaten Favoriten speichern'),
@@ -50,7 +67,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
   client.once(Events.ClientReady, async () => {
     try {
       const guild = await client.guilds.fetch(guildId);
-      await guild.commands.set(commandData);
+      await guild.commands.set([radioCommand(radio.stations()).toJSON(), ...favCommandData]);
       log('Slash-Commands registriert');
     } catch (err) {
       log('Slash-Commands konnten nicht registriert werden:', err.message,
@@ -246,7 +263,55 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
     }
   }
 
-  const handlers = { fav: handleFav, favs: handleFavs, unfav: handleUnfav, youtube: handleYoutube };
+  async function handleRadio(i) {
+    const sub = i.options.getSubcommand();
+    const cur = radio.current();
+    const line = (st) => `${st.emoji} **${esc(st.name)}**${st.id === cur.id ? ' · *läuft*' : ''}\n${esc(st.description)}`;
+
+    if (sub === 'liste') {
+      return i.reply({
+        ...ephemeral,
+        embeds: [new EmbedBuilder()
+          .setColor(COLOR)
+          .setTitle('📻 Sender')
+          .setDescription(radio.stations().map(line).join('\n\n'))
+          .setFooter({ text: 'Umschalten: /radio wechseln' })],
+      });
+    }
+
+    if (sub === 'jetzt') {
+      const song = await radio.nowPlaying();
+      return i.reply({
+        ...ephemeral,
+        embeds: [new EmbedBuilder()
+          .setColor(COLOR)
+          .setTitle(`${cur.emoji} ${cur.name}`)
+          .setDescription(song ? `🎵 ${esc(song.text)}` : (cur.dj ? `🎙️ ${esc(cur.dj)} ist dran` : 'Gerade kein Song'))
+          .setFooter({ text: 'Song merken: /fav' })],
+      });
+    }
+
+    // wechseln
+    const id = i.options.getString('sender', true);
+    const target = radio.stations().find((st) => st.id === id);
+    if (!target) return i.reply({ ...ephemeral, content: 'Den Sender gibt\'s nicht – schau in `/radio liste`.' });
+    if (target.id === cur.id) return i.reply({ ...ephemeral, content: `${target.emoji} **${esc(target.name)}** läuft schon.` });
+
+    const botChannel = i.guild?.members.me?.voice.channelId;
+    const member = await i.guild?.members.fetch(i.user.id).catch(() => null);
+    const allowed = member?.permissions.has(PermissionFlagsBits.ManageGuild)
+      || (botChannel && member?.voice.channelId === botChannel);
+    if (!allowed) {
+      return i.reply({ ...ephemeral, content: 'Umschalten kann nur, wer im Voice-Channel des Radios sitzt.' });
+    }
+
+    await i.deferReply();
+    const st = await radio.switchTo(target.id);
+    log(`${i.user.tag} schaltet auf ${st.name}`);
+    return i.editReply(`${st.emoji} ${i.user} hat auf **${esc(st.name)}** umgeschaltet.`);
+  }
+
+  const handlers = { radio: handleRadio, fav: handleFav, favs: handleFavs, unfav: handleUnfav, youtube: handleYoutube };
 
   client.on(Events.InteractionCreate, async (i) => {
     if (!i.isChatInputCommand()) return;

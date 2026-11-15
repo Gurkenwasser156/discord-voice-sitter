@@ -17,7 +17,13 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && node -e "require('@snazzah/davey')" \
  && npm cache clean --force
 
-COPY index.js radio.js store.js youtube.js commands.js ./
+COPY index.js radio.js audio.js store.js youtube.js commands.js ./
+COPY stations/ ./stations/
+COPY radios/ ./radios/
+
+# GTA-Sender: Audio-Dateien werden NICHT ins Image gepackt, sondern als Volume
+# nach /app/audio gemountet (z.B. /app/audio/non-stop-pop/...)
+ENV AUDIO_DIR=/app/audio
 
 # Favoriten + YouTube-Verknüpfungen (als Volume gemountet)
 RUN mkdir -p /app/data && chown node:node /app/data
