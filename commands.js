@@ -78,15 +78,48 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
     }
   });
 
-  /** Fügt einen Favoriten zur YouTube-Playlist hinzu. Gibt eine Textzeile fürs Ergebnis zurück. */
-  async function syncToYoutube(userId, fav) {
+  // ---------- Eine YouTube-Playlist pro Sender ----------
+  // Vor /radio gab es nur das Internet-Radio (erster Sender): alte Favoriten und
+  // die alte Einzel-Playlist gehören zu ihm.
+  const legacyStation = () => radio.stations()[0]?.id;
+  const stationOf = (fav) => fav.station ?? legacyStation();
+  const stationInfo = (id) => radio.stations().find((st) => st.id === id) ?? { id, name: id, emoji: '📻' };
+
+  /** YouTube-Daten des Users ({ refreshToken, playlists: { senderId: playlistId } }). */
+  function ytOf(userId) {
     const yt = store.youtube(userId);
+    if (!yt || yt.playlists) return yt;
+    const { playlistId, ...rest } = yt; // altes Format migrieren
+    store.setYoutube(userId, { ...rest, playlists: playlistId ? { [legacyStation()]: playlistId } : {} });
+    return store.youtube(userId);
+  }
+
+  const targetFor = (yt, stationId) => ({
+    refreshToken: yt.refreshToken,
+    playlistId: yt.playlists[stationId] ?? null,
+    title: youtube.playlistTitle(stationInfo(stationId).name),
+  });
+
+  function rememberPlaylist(userId, stationId, playlistId) {
+    const yt = ytOf(userId);
+    if (yt.playlists[stationId] === playlistId) return;
+    store.setYoutube(userId, { ...yt, playlists: { ...yt.playlists, [stationId]: playlistId } });
+  }
+
+  const playlistLink = (stationId, playlistId) =>
+    `${stationInfo(stationId).emoji ?? '📻'} [${esc(stationInfo(stationId).name)}](${youtube.playlistUrl(playlistId)})`;
+  const playlistLinks = (yt) => Object.entries(yt.playlists).map(([id, pl]) => playlistLink(id, pl));
+
+  /** Fügt einen Favoriten zur Playlist seines Senders hinzu. Gibt eine Textzeile fürs Ergebnis zurück. */
+  async function syncToYoutube(userId, fav) {
+    const yt = ytOf(userId);
     if (!yt) return null;
+    const stationId = stationOf(fav);
     try {
-      const r = await youtube.addSong(yt, fav);
+      const r = await youtube.addSong(targetFor(yt, stationId), fav);
       store.updateFav(userId, fav.id, { yt: { videoId: r.videoId, itemId: r.itemId }, ytMiss: undefined });
-      if (r.playlistId !== yt.playlistId) store.setYoutube(userId, { ...yt, playlistId: r.playlistId });
-      return { ok: true, line: `▶️ In deiner [YouTube-Playlist](${youtube.playlistUrl(r.playlistId)}) · [Video](${youtube.videoUrl(r.videoId)})` };
+      rememberPlaylist(userId, stationId, r.playlistId);
+      return { ok: true, line: `▶️ In deiner Playlist ${playlistLink(stationId, r.playlistId)} · [Video](${youtube.videoUrl(r.videoId)})` };
     } catch (err) {
       log(`YouTube für ${userId}:`, err.message);
       if (err.code === 'quota') return { ok: false, stop: true, line: '⚠️ YouTube-Tageslimit erreicht – morgen mit `/youtube nachtragen` hinzufügen.' };
@@ -109,7 +142,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
     const song = await radio.nowPlaying();
     if (!song) return i.editReply('Gerade läuft nichts, was ich speichern könnte.');
 
-    const { fav, added } = store.addFav(i.user.id, song);
+    const { fav, added } = store.addFav(i.user.id, { ...song, station: radio.current().id });
     const lines = [added ? '❤️ Zu deinen Favoriten hinzugefügt' : '💾 Ist schon in deinen Favoriten'];
 
     if (store.youtube(i.user.id)) {
@@ -136,13 +169,15 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
     const page = Math.min(i.options.getInteger('seite') ?? 1, pages);
     const start = (page - 1) * PAGE_SIZE;
 
+    const multi = new Set(favs.map(stationOf)).size > 1; // Sender-Emoji nur, wenn gemischt
     const lines = favs.slice(start, start + PAGE_SIZE).map((f, k) => {
       const yt = f.yt ? youtube?.videoUrl(f.yt.videoId) ?? ytSearch(f) : ytSearch(f);
-      return `**${start + k + 1}.** ${esc(f.text)} · [YouTube](${yt}) · [Spotify](${spotifySearch(f)})`;
+      const tag = multi ? `${stationInfo(stationOf(f)).emoji ?? '📻'} ` : '';
+      return `**${start + k + 1}.** ${tag}${esc(f.text)} · [YouTube](${yt}) · [Spotify](${spotifySearch(f)})`;
     });
 
-    const yt = store.youtube(i.user.id);
-    if (yt && youtube) lines.unshift(`▶️ [Deine YouTube-Playlist](${youtube.playlistUrl(yt.playlistId)})\n`);
+    const yt = youtube && ytOf(i.user.id);
+    if (yt && Object.keys(yt.playlists).length) lines.unshift(`▶️ Deine Playlists: ${playlistLinks(yt).join(' · ')}\n`);
 
     const embed = new EmbedBuilder()
       .setColor(COLOR)
@@ -175,7 +210,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
       return i.reply({ ...ephemeral, content: 'YouTube ist für diesen Bot nicht eingerichtet (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET fehlen).' });
     }
     const sub = i.options.getSubcommand();
-    const yt = store.youtube(i.user.id);
+    const yt = ytOf(i.user.id);
 
     if (sub === 'status') {
       if (!yt) return i.reply({ ...ephemeral, content: 'Nicht verbunden. Mit `/youtube verbinden` legst du eine private Playlist an.' });
@@ -184,7 +219,8 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
       const misses = favs.filter((f) => !f.yt && f.ytMiss).map((f) => `#${store.favNumber(i.user.id, f.id)} ${esc(f.text)}`);
       return i.reply({
         ...ephemeral,
-        content: `✅ Verbunden · [Deine Playlist](${youtube.playlistUrl(yt.playlistId)})`
+        content: `✅ Verbunden`
+          + (Object.keys(yt.playlists).length ? `\nDeine Playlists: ${playlistLinks(yt).join(' · ')}` : '\nNoch keine Playlist – die erste entsteht beim nächsten `/fav`.')
           + (missing ? `\n${missing} Favoriten sind noch nicht drin → \`/youtube nachtragen\`` : '')
           + (misses.length ? `\nOhne Treffer (→ \`/youtube setzen\`):\n${misses.slice(0, 10).map((m) => `• ${m}`).join('\n')}` : ''),
       });
@@ -194,7 +230,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
       if (!yt) return i.reply({ ...ephemeral, content: 'Du bist gar nicht verbunden.' });
       await youtube.revoke(yt.refreshToken);
       store.setYoutube(i.user.id, null);
-      return i.reply({ ...ephemeral, content: '👋 Google-Account getrennt. Deine Favoriten bleiben hier gespeichert, die Playlist bleibt in deinem YouTube-Account.' });
+      return i.reply({ ...ephemeral, content: '👋 Google-Account getrennt. Deine Favoriten bleiben hier gespeichert, die Playlists bleiben in deinem YouTube-Account.' });
     }
 
     if (sub === 'nachtragen') {
@@ -216,9 +252,8 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
         }
       }
       const rest = store.favs(i.user.id).filter((f) => !f.yt && !f.ytMiss).length;
-      const ytNow = store.youtube(i.user.id);
       return i.editReply(
-        `▶️ ${songs(done)} zur [Playlist](${youtube.playlistUrl(ytNow.playlistId)}) hinzugefügt.`
+        `▶️ ${songs(done)} nachgetragen · ${playlistLinks(ytOf(i.user.id)).join(' · ')}`
         + (problems.length ? `\n${problems.slice(0, 5).map((p) => `• ${p}`).join('\n')}` : '')
         + (rest ? `\nNoch ${rest} offen.` : ''),
       );
@@ -238,12 +273,13 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
       await i.deferReply(ephemeral);
       const oldItemId = fav.yt?.itemId; // vor updateFav merken (fav wird dabei verändert)
       try {
-        const r = await youtube.addVideo(yt, videoId);
+        const stationId = stationOf(fav);
+        const r = await youtube.addVideo(targetFor(yt, stationId), videoId);
         // Altes (falsches) Video erst entfernen, wenn das neue drin ist
         if (oldItemId) await youtube.removeItem(yt, oldItemId).catch((err) => log('Altes Video nicht entfernt:', err.message));
         store.updateFav(i.user.id, fav.id, { yt: { videoId: r.videoId, itemId: r.itemId }, ytMiss: undefined });
-        if (r.playlistId !== yt.playlistId) store.setYoutube(i.user.id, { ...yt, playlistId: r.playlistId });
-        return i.editReply(`✅ **${esc(fav.text)}** → [Video](${youtube.videoUrl(videoId)}) ist jetzt in deiner [Playlist](${youtube.playlistUrl(r.playlistId)})`
+        rememberPlaylist(i.user.id, stationId, r.playlistId);
+        return i.editReply(`✅ **${esc(fav.text)}** → [Video](${youtube.videoUrl(videoId)}) ist jetzt in deiner Playlist ${playlistLink(stationId, r.playlistId)}`
           + (oldItemId ? ' (das alte Video ist raus).' : '.'));
       } catch (err) {
         log(`YouTube setzen für ${i.user.id}:`, err.message);
@@ -255,7 +291,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
 
     // verbinden
     if (yt) {
-      return i.reply({ ...ephemeral, content: `Schon verbunden · [Deine Playlist](${youtube.playlistUrl(yt.playlistId)}). Zum Wechseln erst \`/youtube trennen\`.` });
+      return i.reply({ ...ephemeral, content: `Schon verbunden${Object.keys(yt.playlists).length ? ` · ${playlistLinks(yt).join(' · ')}` : ''}. Zum Wechseln erst \`/youtube trennen\`.` });
     }
     if (pendingLogins.has(i.user.id)) {
       return i.reply({ ...ephemeral, content: 'Du hast schon einen offenen Login – nimm den Code aus der letzten Nachricht.' });
@@ -277,7 +313,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
         .setDescription([
           `**1.** Öffne ${login.url}`,
           `**2.** Gib diesen Code ein: \`${login.userCode}\``,
-          '**3.** Mit dem Google-Account einloggen, in dem die Playlist landen soll, und Zugriff erlauben.',
+          '**3.** Mit dem Google-Account einloggen, in dem die Playlists landen sollen, und Zugriff erlauben.',
           '',
           'Falls Google „App nicht verifiziert“ anzeigt: *Erweitert → Weiter zu …*',
           `Der Code läuft <t:${Math.floor(login.expiresAt / 1000)}:R> ab. Ich melde mich hier, sobald es geklappt hat.`,
@@ -286,18 +322,24 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
 
     try {
       const refreshToken = await login.done;
-      const playlistId = await youtube.findOrCreatePlaylist(refreshToken);
-      store.setYoutube(i.user.id, { refreshToken, playlistId });
+      // Schon vorhandene Bot-Playlists (z.B. nach erneutem Verbinden) wiederverwenden
+      const stations = radio.stations();
+      const found = await youtube.findPlaylists(refreshToken, stations.map((st) => youtube.playlistTitle(st.name)));
+      const playlists = Object.fromEntries(stations
+        .map((st) => [st.id, found[youtube.playlistTitle(st.name)]])
+        .filter(([, id]) => id));
+      store.setYoutube(i.user.id, { refreshToken, playlists });
       log(`YouTube verbunden für ${i.user.id}`);
-      const missing = store.favs(i.user.id).length;
+      const missing = store.favs(i.user.id).filter((f) => !f.yt && !f.ytMiss).length;
+      const links = playlistLinks(store.youtube(i.user.id));
       await i.editReply({
         embeds: [new EmbedBuilder()
           .setColor(COLOR)
           .setTitle('✅ YouTube verbunden')
           .setDescription([
-            `Deine private Playlist: [öffnen](${youtube.playlistUrl(playlistId)})`,
-            'Ab jetzt landet jeder `/fav` automatisch darin.',
-            missing ? `Deine ${missing} bisherigen Favoriten kannst du mit \`/youtube nachtragen\` übernehmen.` : '',
+            'Jeder Sender bekommt seine eigene private Playlist – angelegt beim ersten `/fav` auf dem Sender.',
+            links.length ? `Wiedergefunden: ${links.join(' · ')}` : '',
+            missing ? `${songs(missing)} aus deinen Favoriten fehlen noch → \`/youtube nachtragen\`` : '',
           ].filter(Boolean).join('\n'))],
       });
     } catch (err) {

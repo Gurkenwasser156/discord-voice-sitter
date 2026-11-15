@@ -7,7 +7,8 @@
 
 const SCOPE = 'https://www.googleapis.com/auth/youtube';
 const API = 'https://www.googleapis.com/youtube/v3';
-const PLAYLIST_TITLE = 'j-indies radio ❤️';
+/** Titel der Bot-Playlist für einen Sender, z.B. "Non-Stop-Pop FM ❤️". */
+export const playlistTitle = (stationName) => `${stationName} ❤️`;
 
 export class YoutubeError extends Error {
   constructor(message, code, reason) {
@@ -174,35 +175,44 @@ export function createYoutube({ clientId, clientSecret }) {
     return json;
   }
 
-  async function createPlaylist(refreshToken) {
+  async function createPlaylist(refreshToken, title) {
     const pl = await api(refreshToken, 'POST', 'playlists', {
       query: { part: 'snippet,status' },
       body: {
-        snippet: { title: PLAYLIST_TITLE, description: 'Favoriten aus dem j-indies radio (per /fav im Discord).' },
+        snippet: { title, description: 'Favoriten aus dem Discord-Radio (per /fav).' },
         status: { privacyStatus: 'private' },
       },
     });
     return pl.id;
   }
 
-  /** Sucht die Bot-Playlist im Account des Users (1 Quota-Einheit pro Seite). */
-  async function findPlaylist(refreshToken) {
+  /**
+   * Sucht Playlists mit den angegebenen Titeln im Account des Users
+   * (1 Quota-Einheit pro 50 Playlists). Gibt { titel: playlistId } zurück.
+   */
+  async function findPlaylists(refreshToken, titles) {
+    const found = {};
     let pageToken;
     do {
       const page = await api(refreshToken, 'GET', 'playlists', {
         query: { part: 'snippet', mine: 'true', maxResults: '50', ...(pageToken ? { pageToken } : {}) },
       });
-      const hit = page.items?.find((p) => p.snippet?.title === PLAYLIST_TITLE);
-      if (hit) return hit.id;
+      for (const p of page.items ?? []) {
+        const t = p.snippet?.title;
+        if (titles.includes(t) && !found[t]) found[t] = p.id;
+      }
       pageToken = page.nextPageToken;
-    } while (pageToken);
-    return null;
+    } while (pageToken && Object.keys(found).length < titles.length);
+    return found;
   }
 
-  /** Fügt ein Video zur Playlist hinzu; fehlt die Playlist, wird sie gesucht bzw. neu angelegt. */
-  async function addVideo(yt, videoId) {
-    let playlistId = yt.playlistId;
-    const insert = () => api(yt.refreshToken, 'POST', 'playlistItems', {
+  /**
+   * Fügt ein Video zur Playlist des Ziels hinzu ({ refreshToken, playlistId?, title }).
+   * Fehlt die Playlist (noch nie angelegt oder gelöscht), wird sie gesucht bzw. neu angelegt.
+   */
+  async function addVideo(target, videoId) {
+    let playlistId = target.playlistId || await findOrCreatePlaylist(target.refreshToken, target.title);
+    const insert = () => api(target.refreshToken, 'POST', 'playlistItems', {
       query: { part: 'snippet' },
       body: { snippet: { playlistId, resourceId: { kind: 'youtube#video', videoId } } },
     });
@@ -213,15 +223,15 @@ export function createYoutube({ clientId, clientSecret }) {
     } catch (err) {
       // Nur wenn wirklich die PLAYLIST fehlt (nicht z.B. das Video)
       if (err.reason !== 'playlistNotFound') throw err;
-      playlistId = await findOrCreatePlaylist(yt.refreshToken);
+      playlistId = await findOrCreatePlaylist(target.refreshToken, target.title);
       item = await insert();
     }
     return { videoId, itemId: item.id, playlistId };
   }
 
   /** Vorhandene Playlist wiederverwenden, nur wenn es keine gibt eine neue anlegen. */
-  async function findOrCreatePlaylist(refreshToken) {
-    return (await findPlaylist(refreshToken)) ?? createPlaylist(refreshToken);
+  async function findOrCreatePlaylist(refreshToken, title) {
+    return (await findPlaylists(refreshToken, [title]))[title] ?? createPlaylist(refreshToken, title);
   }
 
   return {
@@ -267,6 +277,7 @@ export function createYoutube({ clientId, clientSecret }) {
     },
 
     findOrCreatePlaylist,
+    findPlaylists,
 
     /**
      * Sucht den Song und fügt ihn zur Playlist hinzu. Ist die Playlist weg, wird
@@ -307,6 +318,7 @@ export function createYoutube({ clientId, clientSecret }) {
     },
 
     parseVideoId,
+    playlistTitle,
     playlistUrl: (playlistId) => `https://www.youtube.com/playlist?list=${playlistId}`,
     videoUrl: (videoId) => `https://www.youtube.com/watch?v=${videoId}`,
   };
