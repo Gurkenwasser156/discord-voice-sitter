@@ -201,7 +201,7 @@ function currentTimeSlot(date = new Date()) {
 /**
  * def: { id, name, folder, dj?, description?, emoji?, aliases?, songs?: { KEY: { artist, title } } }
  */
-export async function createGtaStation(def, { ffmpegPath, volume, audioDir, dataDir, log }) {
+export async function createGtaStation(def, { ffmpegPath, volume, audioDir, dataDir, log, settings = {} }) {
   const root = path.resolve(audioDir, def.folder ?? def.id);
   if (!fs.existsSync(root)) {
     log(`Audio-Ordner ${root} fehlt -> Sender "${def.name}" übersprungen`);
@@ -276,6 +276,15 @@ export async function createGtaStation(def, { ffmpegPath, volume, audioDir, data
 
   const seg = (type, file, extra = {}) => ({ type, file, duration: dur(file), ...extra });
 
+  // Werbung/Nachrichten per /radio werbung abschaltbar (settings wird von radio.js geteilt)
+  const adsOn = () => settings.ads !== false;
+  const newsOn = () => settings.news !== false;
+  function allowed(s) {
+    if (s.type === 'ad' || (s.type === 'to' && s.toKind === 'AD')) return adsOn();
+    if (s.type === 'news' || (s.type === 'to' && s.toKind === 'NEWS')) return newsOn();
+    return true;
+  }
+
   function songSegment(prevType, { withVoice = true } = {}) {
     const key = bags.songs.pick();
     const file = lib.songs.get(key);
@@ -294,19 +303,23 @@ export async function createGtaStation(def, { ffmpegPath, volume, audioDir, data
   }
 
   function next(prev) {
-    if (queue.length) return queue.shift();
+    // Eingeplantes, das inzwischen abgeschaltet wurde, überspringen
+    while (queue.length) {
+      const s = queue.shift();
+      if (allowed(s)) return s;
+    }
     if (prev?.type !== 'song') return songSegment(prev?.type);
 
     let r = Math.random();
-    if (hasAds && (r -= BREAK.ad) < 0) {
+    if (hasAds && adsOn() && (r -= BREAK.ad) < 0) {
       queue.push(seg('ad', bags.ads.pick()));
       if (lib.ads.length > 1 && Math.random() < 0.5) queue.push(seg('ad', bags.ads.pick()));
       if (lib.ids.length && Math.random() < 0.5) queue.push(seg('id', bags.ids.pick()));
-      return seg('to', bags.to.get('AD').pick());
+      return seg('to', bags.to.get('AD').pick(), { toKind: 'AD' });
     }
-    if (hasNews && (r -= BREAK.news) < 0) {
+    if (hasNews && newsOn() && (r -= BREAK.news) < 0) {
       queue.push(seg('news', bags.news.pick()));
-      return seg('to', bags.to.get('NEWS').pick());
+      return seg('to', bags.to.get('NEWS').pick(), { toKind: 'NEWS' });
     }
     if (lib.ids.length && (r -= BREAK.id) < 0) return seg('id', bags.ids.pick());
     if (lib.solos.length && (r -= BREAK.solo) < 0) return seg('solo', bags.solos.pick());
@@ -372,14 +385,17 @@ export async function createGtaStation(def, { ffmpegPath, volume, audioDir, data
     return null;
   }
 
-  /** Aktuelles Segment laut tatsächlich abgespielter Position im Discord-Player. */
-  function currentSegment() {
-    if (!session) return cursor.seg;
+  /** Aktuelles Segment + Position darin, laut tatsächlich abgespielter Zeit im Discord-Player. */
+  function currentEntry() {
+    if (!session) return { seg: cursor.seg, position: cursor.offset };
     const played = (session.resource?.playbackDuration ?? 0) / 1000;
     let cur = session.entries[0];
     for (const e of session.entries) if (e.streamAt <= played) cur = e;
-    return cur?.seg ?? cursor.seg;
+    if (!cur) return { seg: cursor.seg, position: cursor.offset };
+    return { seg: cur.seg, position: Math.max(0, played - cur.streamAt + cur.offset) };
   }
+
+  const currentSegment = () => currentEntry().seg;
 
   function trackLastSong() {
     const s = currentSegment();
@@ -496,6 +512,28 @@ export async function createGtaStation(def, { ffmpegPath, volume, audioDir, data
     },
 
     close() { if (session) closeSession(session); },
+
+    /** Zum nächsten Segment springen. Danach open() aufrufen, um weiterzuspielen. */
+    skip() {
+      if (session) closeSession(session);
+      const skipped = cursor.seg;
+      cursor = { seg: next(skipped), offset: 0, at: Date.now() };
+      log(`⏭ übersprungen: ${skipped.type === 'song' ? songMeta(skipped.key).text : path.basename(skipped.file)}`);
+      return describe(skipped);
+    },
+
+    /** Art des laufenden Segments: song, ad, news, to, id, solo */
+    currentType() {
+      const s = currentSegment();
+      return s.type === 'to' ? `to-${(s.toKind ?? '').toLowerCase()}` : s.type;
+    },
+
+    /** Fortschritt im aktuellen Song (für die Progress-Bar), sonst null. */
+    progress() {
+      const { seg: s, position } = currentEntry();
+      if (s?.type !== 'song' || !s.duration) return null;
+      return { position: Math.min(position, s.duration), duration: s.duration };
+    },
 
     async nowPlaying() {
       trackLastSong();

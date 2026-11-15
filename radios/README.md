@@ -2,8 +2,17 @@
 
 Der Radio-Bot kann mehrere Sender spielen. Umschalten im Discord mit
 `/radio wechseln sender:<name>` (wer im Voice-Channel des Bots sitzt oder „Server verwalten“ hat),
-`/radio liste` zeigt alle, `/radio jetzt` den aktuellen Song. Der zuletzt gewählte Sender
+`/radio liste` zeigt alle, `/radio jetzt` den aktuellen Song mit Fortschritt. Der zuletzt gewählte Sender
 wird gemerkt (`DATA_DIR/radio-state.json`).
+
+Steuerung (gleiche Berechtigung wie Umschalten):
+
+- `/skip` – nächster Song bzw. Beitrag (nur GTA-Sender, Live-Radios kann man nicht skippen)
+- `/pause` – pausieren, nochmal `/pause` setzt fort (Live-Radios verbinden dabei neu, damit sie wieder live sind)
+- `/radio werbung status:an|aus [was:beides|nur Werbung|nur Nachrichten]` – Werbung/Nachrichten der
+  GTA-Sender an- oder abschalten; läuft gerade Werbung, wird sie beim Abschalten übersprungen. Wird gemerkt.
+
+Der Bot-Status zeigt den aktuellen Song mit Fortschrittsbalken (`━━━●────── 1:23 / 3:45`).
 
 Jede `*.json` hier ist ein Sender. Dazu kommt das Internet-Radio aus `RADIO_URL` (falls gesetzt).
 

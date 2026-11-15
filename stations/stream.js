@@ -147,6 +147,14 @@ export function createStreamStation(def, { ffmpegPath, volume, log }) {
       return prefix + (current?.text ?? npCache?.np?.station?.name ?? def.name);
     },
 
+    /** Fortschritt im aktuellen Song laut AzuraCast (played_at + duration), sonst null. */
+    progress() {
+      const np = npCache?.np?.now_playing;
+      if (!np?.duration || !np.played_at) return null;
+      const position = Math.max(0, Date.now() / 1000 - np.played_at);
+      return { position: Math.min(position, np.duration), duration: np.duration };
+    },
+
     /** Beim Laden einmal die API fragen (Sendername für das /radio-Menü). */
     async init() {
       if (!api) return;

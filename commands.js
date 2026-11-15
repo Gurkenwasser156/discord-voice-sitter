@@ -9,7 +9,11 @@ import {
 // Sender:
 //   /radio liste             alle Sender anzeigen
 //   /radio wechseln <sender> umschalten (nur wer im Channel des Bots ist oder "Server verwalten" hat)
-//   /radio jetzt             was läuft gerade
+//   /radio jetzt             was läuft gerade (mit Fortschritt)
+//   /radio werbung <an|aus>  Werbung/Nachrichten der GTA-Sender an- oder abschalten
+//   /skip                    nächster Song (GTA-Sender)
+//   /pause                   pausieren / fortsetzen
+//   (Umschalten, Werbung, Skip, Pause: nur wer im Channel des Bots ist oder "Server verwalten" hat)
 //
 // Private Favoriten (alle Antworten nur für den User sichtbar):
 //   /fav                 aktuellen Song speichern (+ in die eigene YouTube-Playlist)
@@ -32,8 +36,22 @@ function radioCommand(stations) {
     .addSubcommand((s) => s.setName('jetzt').setDescription('Was gerade läuft'))
     .addSubcommand((s) => s.setName('wechseln').setDescription('Auf einen anderen Sender umschalten')
       .addStringOption((o) => o.setName('sender').setDescription('Sender').setRequired(true)
-        .addChoices(...stations.slice(0, 25).map((st) => ({ name: st.name.slice(0, 100), value: st.id })))));
+        .addChoices(...stations.slice(0, 25).map((st) => ({ name: st.name.slice(0, 100), value: st.id })))))
+    .addSubcommand((s) => s.setName('werbung').setDescription('Werbung und Nachrichten an- oder abschalten')
+      .addStringOption((o) => o.setName('status').setDescription('an oder aus').setRequired(true)
+        .addChoices({ name: 'an', value: 'an' }, { name: 'aus', value: 'aus' }))
+      .addStringOption((o) => o.setName('was').setDescription('Standard: beides')
+        .addChoices(
+          { name: 'Werbung und Nachrichten', value: 'beides' },
+          { name: 'nur Werbung', value: 'ads' },
+          { name: 'nur Nachrichten', value: 'news' },
+        )));
 }
+
+const controlCommandData = [
+  new SlashCommandBuilder().setName('skip').setDescription('Zum nächsten Song springen'),
+  new SlashCommandBuilder().setName('pause').setDescription('Radio pausieren oder fortsetzen'),
+].map((c) => c.toJSON());
 
 const favCommandData = [
   new SlashCommandBuilder()
@@ -70,7 +88,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
   client.once(Events.ClientReady, async () => {
     try {
       const guild = await client.guilds.fetch(guildId);
-      await guild.commands.set([radioCommand(radio.stations()).toJSON(), ...favCommandData]);
+      await guild.commands.set([radioCommand(radio.stations()).toJSON(), ...controlCommandData, ...favCommandData]);
       log('Slash-Commands registriert');
     } catch (err) {
       log('Slash-Commands konnten nicht registriert werden:', err.message,
@@ -350,6 +368,38 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
     }
   }
 
+  /** Steuern darf, wer im Voice-Channel des Bots sitzt oder "Server verwalten" hat. */
+  async function canControl(i) {
+    const botChannel = i.guild?.members.me?.voice.channelId;
+    const member = await i.guild?.members.fetch(i.user.id).catch(() => null);
+    return Boolean(member?.permissions.has(PermissionFlagsBits.ManageGuild)
+      || (botChannel && member?.voice.channelId === botChannel));
+  }
+  const notAllowed = (i) => i.reply({ ...ephemeral, content: 'Das kann nur, wer im Voice-Channel des Radios sitzt.' });
+
+  async function handleSkip(i) {
+    if (!radio.canSkip()) return i.reply({ ...ephemeral, content: '📡 Bei einem Live-Radio kann man nicht skippen.' });
+    if (!(await canControl(i))) return notAllowed(i);
+    await i.deferReply();
+    const skipped = await radio.skip();
+    log(`${i.user.tag} skippt${skipped ? ` ${skipped.text}` : ''}`);
+    const now = await radio.nowPlaying();
+    const what = skipped ? `**${esc(skipped.text)}**` : 'den Beitrag';
+    return i.editReply(`⏭ ${i.user} hat ${what} übersprungen`
+      // nowPlaying() liefert während Jingles den letzten Song -> nicht den gerade übersprungenen anzeigen
+      + (now && now.id !== skipped?.id ? ` · jetzt: **${esc(now.text)}**` : '.'));
+  }
+
+  async function handlePause(i) {
+    if (!(await canControl(i))) return notAllowed(i);
+    await i.deferReply();
+    const paused = await radio.togglePause();
+    log(`${i.user.tag} ${paused ? 'pausiert' : 'setzt fort'}`);
+    return i.editReply(paused
+      ? `⏸ ${i.user} hat das Radio pausiert. Mit \`/pause\` geht's weiter.`
+      : `▶️ ${i.user} hat das Radio fortgesetzt.`);
+  }
+
   async function handleRadio(i) {
     const sub = i.options.getSubcommand();
     const cur = radio.current();
@@ -366,14 +416,34 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
       });
     }
 
+    if (sub === 'werbung') {
+      if (!(await canControl(i))) return notAllowed(i);
+      const on = i.options.getString('status', true) === 'an';
+      const was = i.options.getString('was') ?? 'beides';
+      const kinds = was === 'beides' ? ['ads', 'news'] : [was];
+      await i.deferReply();
+      for (const k of kinds) await radio.setBreaks(k, on);
+      const b = radio.breaks();
+      const label = { beides: 'Werbung und Nachrichten', ads: 'Werbung', news: 'Nachrichten' }[was];
+      log(`${i.user.tag}: ${label} ${on ? 'an' : 'aus'}`);
+      return i.editReply(`${on ? '📢' : '🔇'} ${i.user} hat ${label} **${on ? 'angeschaltet' : 'abgeschaltet'}**.`
+        + `\nWerbung: ${b.ads ? 'an' : 'aus'} · Nachrichten: ${b.news ? 'an' : 'aus'}`
+        + (cur.type === 'gta' ? '' : '\n*(gilt für die GTA-Sender – Live-Radios senden ihr eigenes Programm)*'));
+    }
+
     if (sub === 'jetzt') {
       const song = await radio.nowPlaying();
+      const p = radio.progress();
+      const status = radio.isPaused() ? '⏸ Pausiert' : (p ? radio.progressBar(p) : null);
       return i.reply({
         ...ephemeral,
         embeds: [new EmbedBuilder()
           .setColor(COLOR)
           .setTitle(`${cur.emoji} ${cur.name}`)
-          .setDescription(song ? `🎵 ${esc(song.text)}` : (cur.dj ? `🎙️ ${esc(cur.dj)} ist dran` : 'Gerade kein Song'))
+          .setDescription([
+            song ? `🎵 ${esc(song.text)}` : (cur.dj ? `🎙️ ${esc(cur.dj)} ist dran` : 'Gerade kein Song'),
+            status && `\`${status}\``,
+          ].filter(Boolean).join('\n'))
           .setFooter({ text: 'Song merken: /fav' })],
       });
     }
@@ -384,11 +454,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
     if (!target) return i.reply({ ...ephemeral, content: 'Den Sender gibt\'s nicht – schau in `/radio liste`.' });
     if (target.id === cur.id) return i.reply({ ...ephemeral, content: `${target.emoji} **${esc(target.name)}** läuft schon.` });
 
-    const botChannel = i.guild?.members.me?.voice.channelId;
-    const member = await i.guild?.members.fetch(i.user.id).catch(() => null);
-    const allowed = member?.permissions.has(PermissionFlagsBits.ManageGuild)
-      || (botChannel && member?.voice.channelId === botChannel);
-    if (!allowed) {
+    if (!(await canControl(i))) {
       return i.reply({ ...ephemeral, content: 'Umschalten kann nur, wer im Voice-Channel des Radios sitzt.' });
     }
 
@@ -398,7 +464,7 @@ export function setupCommands({ client, guildId, radio, store, youtube }) {
     return i.editReply(`${st.emoji} ${i.user} hat auf **${esc(st.name)}** umgeschaltet.`);
   }
 
-  const handlers = { radio: handleRadio, fav: handleFav, favs: handleFavs, unfav: handleUnfav, youtube: handleYoutube };
+  const handlers = { radio: handleRadio, skip: handleSkip, pause: handlePause, fav: handleFav, favs: handleFavs, unfav: handleUnfav, youtube: handleYoutube };
 
   client.on(Events.InteractionCreate, async (i) => {
     if (!i.isChatInputCommand()) return;

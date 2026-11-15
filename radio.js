@@ -16,7 +16,15 @@ import { loadStations } from './stations/index.js';
 // Grundregel wie im Sitter: Bricht ein Stream ab, wird NUR der Player neu
 // gestartet. Die Voice-Verbindung bleibt unangetastet -> der Bot bleibt im Channel.
 
-const PRESENCE_MS = 5_000;
+const PRESENCE_MS = 10_000; // Discord begrenzt Status-Updates, 10s reichen für die Progress-Bar
+const BAR_LEN = 10;
+
+const fmtTime = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+/** "━━━━●───── 1:23 / 3:45" */
+function progressBar({ position, duration }) {
+  const filled = Math.min(BAR_LEN - 1, Math.floor((position / duration) * BAR_LEN));
+  return `${'━'.repeat(filled)}●${'─'.repeat(BAR_LEN - 1 - filled)} ${fmtTime(position)} / ${fmtTime(duration)}`;
+}
 const RESTART_MIN_MS = 2_000;
 const RESTART_MAX_MS = 60_000;
 
@@ -31,23 +39,27 @@ export async function createRadio(client, env) {
   log(`Lautstärke: ${Math.round(volume * 100)}%`);
   log(`Audio-Ordner (GTA-Sender): ${path.resolve(audioDir)}`);
 
-  const stations = await loadStations(env, { ffmpegPath, volume, audioDir, dataDir, log });
+  // Zustand, der Neustarts überlebt: Sender + Werbung/Nachrichten an/aus
+  const stateFile = path.join(dataDir, 'radio-state.json');
+  let saved = {};
+  try { saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { /* erster Start */ }
+  // Wird mit den GTA-Sendern geteilt (gleiches Objekt) -> Änderungen wirken sofort
+  const settings = { ads: saved.ads !== false, news: saved.news !== false };
+
+  const stations = await loadStations(env, { ffmpegPath, volume, audioDir, dataDir, log, settings });
   if (!stations.size) {
     throw new Error('Kein Sender verfügbar: RADIO_URL setzen und/oder GTA-Audio nach AUDIO_DIR legen (siehe README).');
   }
   log(`Sender: ${[...stations.values()].map((s) => `${s.name} (${s.id})`).join(', ')}`);
 
   // Zuletzt gewählter Sender überlebt Neustarts
-  const stateFile = path.join(dataDir, 'radio-state.json');
-  let saved = null;
-  try { saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')).station; } catch { /* erster Start */ }
-  const wanted = [saved, env.DEFAULT_STATION].find((id) => id && stations.has(id));
+  const wanted = [saved.station, env.DEFAULT_STATION].find((id) => id && stations.has(id));
   let station = stations.get(wanted) ?? stations.values().next().value;
 
   function saveState() {
     try {
       fs.mkdirSync(dataDir, { recursive: true });
-      fs.writeFileSync(stateFile, JSON.stringify({ station: station.id }));
+      fs.writeFileSync(stateFile, JSON.stringify({ station: station.id, ...settings }));
     } catch (err) {
       log('Sender-Auswahl konnte nicht gespeichert werden:', err.message);
     }
@@ -64,7 +76,9 @@ export async function createRadio(client, env) {
   let failures = 0;
   let startedAt = 0;
   let lastActivity = null;
+  let lastLogged = null;
   let generation = 0;    // verhindert, dass alte Streams nach einem Wechsel noch Neustarts auslösen
+  let paused = false;
 
   function stopCurrent() {
     if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
@@ -87,6 +101,7 @@ export async function createRadio(client, env) {
 
   async function start() {
     stopCurrent();
+    paused = false;
     const gen = ++generation;
     const st = station;
     let h;
@@ -122,11 +137,19 @@ export async function createRadio(client, env) {
 
   async function updatePresence() {
     try {
-      const name = String(await station.presence() || station.name).slice(0, 128);
+      const text = String(await station.presence() || station.name);
+      if (text !== lastLogged) {
+        lastLogged = text;
+        log(`Now Playing: ${text}`);
+      }
+      // Bar ist ~30 Zeichen lang, Discord erlaubt 128 -> Text vorher kürzen
+      const p = paused ? null : station.progress?.();
+      const name = paused
+        ? `⏸ ${text}`.slice(0, 128)
+        : p ? `${text.slice(0, 96)} ${progressBar(p)}` : text.slice(0, 128);
       if (name !== lastActivity) {
         lastActivity = name;
         client.user?.setActivity({ name, type: ActivityType.Listening });
-        log(`Now Playing: ${name}`);
       }
     } catch (err) {
       log('Now Playing fehlgeschlagen:', err.message);
@@ -157,6 +180,60 @@ export async function createRadio(client, env) {
       await start();
       return info(station);
     },
+    /** Fortschritt im aktuellen Song ({ position, duration } in Sekunden) oder null. */
+    progress: () => station.progress?.() ?? null,
+    progressBar,
+    isPaused: () => paused,
+    canSkip: () => typeof station.skip === 'function',
+
+    /** Nächsten Song/Beitrag spielen (nur GTA-Sender). Gibt das Übersprungene zurück. */
+    async skip() {
+      if (typeof station.skip !== 'function') {
+        throw new Error('Bei einem Live-Radio kann man nicht skippen.');
+      }
+      stopCurrent();
+      const skipped = station.skip();
+      failures = 0;
+      await start();
+      return skipped;
+    },
+
+    /** Pausieren bzw. fortsetzen. Gibt true zurück, wenn jetzt pausiert ist. */
+    async togglePause() {
+      if (!paused) {
+        player.pause(true);
+        paused = true;
+        log(`${station.name} pausiert`);
+      } else if (station.type === 'stream') {
+        // Live-Stream: neu verbinden, damit es wieder "live" ist und nicht hinterherhinkt
+        await start();
+        log(`${station.name} fortgesetzt (neu verbunden)`);
+      } else {
+        player.unpause();
+        paused = false;
+        log(`${station.name} fortgesetzt`);
+      }
+      updatePresence();
+      return paused;
+    },
+
+    breaks: () => ({ ...settings }),
+
+    /** Werbung (kind = 'ads') oder Nachrichten ('news') an/aus. Läuft gerade so was, wird es übersprungen. */
+    async setBreaks(kind, on) {
+      settings[kind] = on;
+      saveState();
+      log(`${kind === 'ads' ? 'Werbung' : 'Nachrichten'} ${on ? 'an' : 'aus'}`);
+      if (on || paused || typeof station.currentType !== 'function') return;
+      const t = station.currentType();
+      const hit = kind === 'ads' ? ['ad', 'to-ad'] : ['news', 'to-news'];
+      if (hit.includes(t)) {
+        stopCurrent();
+        station.skip();
+        await start();
+      }
+    },
+
     start() {
       start();
       setInterval(updatePresence, PRESENCE_MS);
